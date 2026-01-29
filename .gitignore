@@ -1,0 +1,54 @@
+# === Xcode ===
+.DS_Store
+.build/
+DerivedData/
+xcuserdata/
+*.xcuserstate
+*.xccheckout
+*.xcscmblueprint
+
+# === Swift Package Manager ===
+.build/
+Packages/
+Package.resolved
+
+# === Xcode build products ===
+build/
+*.ipa
+*.dSYM
+*.dSYM.zip
+*.dSYM.tar.gz
+
+# === User-specific Xcode files ===
+*.pbxuser
+*.mode1v3
+*.mode2v3
+*.perspectivev3
+!default.pbxuser
+!default.mode1v3
+!default.mode2v3
+!default.perspectivev3
+
+# === Playgrounds ===
+timeline.xctimeline
+playground.xcworkspace
+
+# === Fastlane ===
+fastlane/report.xml
+fastlane/Preview.html
+fastlane/screenshots
+fastlane/test_output
+
+# === Code signing ===
+*.cer
+*.p12
+*.mobileprovision
+
+# === Logs ===
+*.log
+
+# === Temporary files ===
+*.swp
+*.tmp
+*.temp
+
