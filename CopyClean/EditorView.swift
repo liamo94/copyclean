@@ -3,10 +3,17 @@ import AppKit
 
 struct LineNumberView: View {
     let text: String
+    let fontSize: CGFloat
     
     private var lineCount: Int {
         let lines = text.split(separator: "\n", omittingEmptySubsequences: false)
         return max(lines.count, 1)
+    }
+    
+    private var lineHeight: CGFloat {
+        let font = NSFont.monospacedSystemFont(ofSize: fontSize, weight: .regular)
+        let layoutManager = NSLayoutManager()
+        return layoutManager.defaultLineHeight(for: font)
     }
     
     var body: some View {
@@ -14,9 +21,9 @@ struct LineNumberView: View {
             VStack(alignment: .trailing, spacing: 0) {
                 ForEach(1...lineCount, id: \.self) { lineNumber in
                     Text("\(lineNumber)")
-                        .font(.system(.body, design: .monospaced))
+                        .font(.system(size: fontSize, design: .monospaced))
                         .foregroundColor(.secondary)
-                        .frame(height: 19.5) // Match TextEditor line height
+                        .frame(height: lineHeight)
                         .padding(.trailing, 8)
                 }
             }
@@ -28,6 +35,7 @@ struct LineNumberView: View {
 
 struct EditorView: View {
     @ObservedObject var viewModel: EditorViewModel
+    @ObservedObject private var settings = SettingsManager.shared
     var onSave: () -> Void
     var onClose: () -> Void
     @FocusState private var isTextEditorFocused: Bool
@@ -37,6 +45,7 @@ struct EditorView: View {
     @State private var replaceText = ""
     @State private var matchCount = 0
     @FocusState private var isFindFieldFocused: Bool
+    @State private var fontSizeMonitor: Any?
     
     var body: some View {
         VStack(spacing: 0) {
@@ -88,14 +97,14 @@ struct EditorView: View {
             // Editor area with line numbers
             HStack(alignment: .top, spacing: 0) {
                 // Line numbers
-                LineNumberView(text: viewModel.text)
+                LineNumberView(text: viewModel.text, fontSize: settings.fontSize)
                     .frame(width: 40)
                     .background(Color(nsColor: .controlBackgroundColor))
                 
                 Divider()
                 
                 // Custom text editor with tab support
-                CustomTextEditor(text: $viewModel.text, onTextViewReady: { tv in
+                CustomTextEditor(text: $viewModel.text, fontSize: settings.fontSize, onTextViewReady: { tv in
                     textView = tv
                 })
                 .focused($isTextEditorFocused)
@@ -232,6 +241,33 @@ struct EditorView: View {
             // Auto-focus the text editor when window appears
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
                 isTextEditorFocused = true
+            }
+            // Monitor for Cmd+Plus/Minus/0 font size shortcuts
+            fontSizeMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { event in
+                guard event.modifierFlags.contains(.command),
+                      !event.modifierFlags.contains(.shift),
+                      !event.modifierFlags.contains(.option) else {
+                    return event
+                }
+                switch event.charactersIgnoringModifiers {
+                case "=", "+":
+                    settings.fontSize = min(settings.fontSize + 1, 36)
+                    return nil
+                case "-":
+                    settings.fontSize = max(settings.fontSize - 1, 9)
+                    return nil
+                case "0":
+                    settings.fontSize = NSFont.systemFontSize
+                    return nil
+                default:
+                    return event
+                }
+            }
+        }
+        .onDisappear {
+            if let monitor = fontSizeMonitor {
+                NSEvent.removeMonitor(monitor)
+                fontSizeMonitor = nil
             }
         }
     }
@@ -386,6 +422,7 @@ struct EditorView: View {
 // Custom NSTextView wrapper with tab indentation support
 struct CustomTextEditor: NSViewRepresentable {
     @Binding var text: String
+    var fontSize: CGFloat
     var onTextViewReady: ((NSTextView) -> Void)?
     
     func makeNSView(context: Context) -> NSScrollView {
@@ -396,7 +433,7 @@ struct CustomTextEditor: NSViewRepresentable {
         textView.isEditable = true
         textView.isSelectable = true
         textView.allowsUndo = true
-        textView.font = .monospacedSystemFont(ofSize: NSFont.systemFontSize, weight: .regular)
+        textView.font = .monospacedSystemFont(ofSize: fontSize, weight: .regular)
         textView.textContainerInset = NSSize(width: 12, height: 12)
         textView.autoresizingMask = [.width, .height]
         textView.delegate = context.coordinator
@@ -422,6 +459,12 @@ struct CustomTextEditor: NSViewRepresentable {
         let textView = scrollView.documentView as! NSTextView
         if textView.string != text {
             textView.string = text
+        }
+        
+        // Apply font size changes
+        let newFont = NSFont.monospacedSystemFont(ofSize: fontSize, weight: .regular)
+        if textView.font != newFont {
+            textView.font = newFont
         }
         
         // Update background color for current appearance

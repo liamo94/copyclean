@@ -38,6 +38,12 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             self?.updateMenuShortcuts()
         }
         
+        // Listen for clear-history requests from Settings UI
+        NotificationCenter.default.addObserver(
+            self, selector: #selector(clearHistory),
+            name: .clearHistory, object: nil
+        )
+        
         // Register global hotkeys
         registerGlobalHotkey()
         
@@ -138,6 +144,9 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     }
     
     @objc func showSettings() {
+        closeEditor()
+        closeHistory()
+        
         if let window = settingsWindow {
             window.makeKeyAndOrderFront(nil)
             NSApp.activate(ignoringOtherApps: true)

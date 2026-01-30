@@ -65,6 +65,11 @@ class SettingsManager: ObservableObject {
     
     @Published var editorShortcut: KeyboardShortcut
     @Published var historyShortcut: KeyboardShortcut
+    @Published var fontSize: CGFloat {
+        didSet {
+            UserDefaults.standard.set(Double(fontSize), forKey: fontSizeKey)
+        }
+    }
     @Published var pauseHistory: Bool {
         didSet {
             UserDefaults.standard.set(pauseHistory, forKey: pauseHistoryKey)
@@ -76,6 +81,7 @@ class SettingsManager: ObservableObject {
     private let editorKey = "EditorShortcut"
     private let historyKey = "HistoryShortcut"
     private let pauseHistoryKey = "PauseHistory"
+    private let fontSizeKey = "EditorFontSize"
     
     init() {
         // Default: Ctrl+Opt+E for editor
@@ -98,6 +104,9 @@ class SettingsManager: ObservableObject {
         }
         
         pauseHistory = UserDefaults.standard.bool(forKey: pauseHistoryKey)
+        
+        let storedFontSize = UserDefaults.standard.double(forKey: fontSizeKey)
+        fontSize = storedFontSize > 0 ? CGFloat(storedFontSize) : NSFont.systemFontSize
     }
     
     func save() {
@@ -193,6 +202,7 @@ struct SettingsView: View {
     
     @State private var editorShortcut: KeyboardShortcut
     @State private var historyShortcut: KeyboardShortcut
+    @State private var showClearConfirm = false
     
     init() {
         _editorShortcut = State(initialValue: SettingsManager.shared.editorShortcut)
@@ -246,6 +256,24 @@ struct SettingsView: View {
                     Toggle("", isOn: $settings.pauseHistory)
                         .labelsHidden()
                 }
+                
+                Divider()
+                
+                HStack {
+                    Text("Clear History")
+                    Spacer()
+                    Button("Clear") {
+                        showClearConfirm = true
+                    }
+                    .alert("Clear History", isPresented: $showClearConfirm) {
+                        Button("Cancel", role: .cancel) {}
+                        Button("Clear", role: .destructive) {
+                            NotificationCenter.default.post(name: .clearHistory, object: nil)
+                        }
+                    } message: {
+                        Text("This will permanently delete all clipboard history.")
+                    }
+                }
             }
             .padding()
             .frame(maxWidth: .infinity)
@@ -274,6 +302,6 @@ struct SettingsView: View {
             .padding(.bottom, 20)
         }
         .padding()
-        .frame(width: 350, height: 370)
+        .frame(width: 350, height: 430)
     }
 }

@@ -72,3 +72,7 @@ class HistoryManager: ObservableObject {
 class EditorViewModel: ObservableObject {
     @Published var text: String = ""
 }
+
+extension Notification.Name {
+    static let clearHistory = Notification.Name("ClearHistory")
+}
