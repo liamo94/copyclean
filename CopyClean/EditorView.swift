@@ -1,7 +1,6 @@
 import SwiftUI
 import AppKit
 
-// Line numbers view
 struct LineNumberView: View {
     let text: String
     
@@ -27,7 +26,6 @@ struct LineNumberView: View {
     }
 }
 
-// Main editor view
 struct EditorView: View {
     @ObservedObject var viewModel: EditorViewModel
     var onSave: () -> Void
@@ -201,6 +199,7 @@ struct EditorView: View {
                 }
                 
                 Button("Cancel") {
+                    closeFindBar()
                     onClose()
                 }
                 .keyboardShortcut(.escape, modifiers: [])
@@ -398,6 +397,12 @@ struct CustomTextEditor: NSViewRepresentable {
         textView.autoresizingMask = [.width, .height]
         textView.delegate = context.coordinator
         
+        // Set background color for dark mode
+        if NSApp.effectiveAppearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua {
+            textView.backgroundColor = NSColor(red: 36/255.0, green: 40/255.0, blue: 44/255.0, alpha: 1.0)
+            textView.insertionPointColor = .white
+        }
+        
         // Disable automatic substitutions
         textView.isAutomaticQuoteSubstitutionEnabled = false
         textView.isAutomaticDashSubstitutionEnabled = false
@@ -531,7 +536,6 @@ struct CustomTextEditor: NSViewRepresentable {
     }
 }
 
-// Preview
 struct EditorView_Previews: PreviewProvider {
     static var previews: some View {
         EditorView(

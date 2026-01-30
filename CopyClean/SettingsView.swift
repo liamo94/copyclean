@@ -45,7 +45,6 @@ struct KeyboardShortcut: Codable, Equatable {
     }
 }
 
-// Settings manager
 class SettingsManager: ObservableObject {
     static let shared = SettingsManager()
     
@@ -97,7 +96,6 @@ class SettingsManager: ObservableObject {
     }
 }
 
-// Shortcut recorder view
 struct ShortcutRecorder: View {
     let title: String
     @Binding var shortcut: KeyboardShortcut
@@ -175,7 +173,6 @@ class ShortcutCaptureNSView: NSView {
     }
 }
 
-// Settings view
 struct SettingsView: View {
     @ObservedObject var settings = SettingsManager.shared
     @Environment(\.dismiss) var dismiss

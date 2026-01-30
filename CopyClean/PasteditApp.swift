@@ -234,6 +234,8 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     }
     
     @objc func showHistory() {
+        closeEditor()
+        
         historyWindow?.close()
         historyWindow = nil
         createHistoryWindow()
@@ -348,6 +350,8 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     }
     
     private func presentEditorWindow() {
+        closeHistory()
+        
         if let window = editorWindow {
             window.makeKeyAndOrderFront(nil)
             NSApp.activate(ignoringOtherApps: true)

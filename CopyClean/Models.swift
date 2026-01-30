@@ -1,7 +1,6 @@
 import SwiftUI
 import Combine
 
-// Model for history entries
 struct HistoryEntry: Identifiable, Codable, Hashable {
     let id: UUID
     let text: String
@@ -23,7 +22,6 @@ struct HistoryEntry: Identifiable, Codable, Hashable {
     }
 }
 
-// History manager to persist entries
 class HistoryManager: ObservableObject {
     @Published var entries: [HistoryEntry] = []
     private let saveKey = "CopyCleanHistory"
