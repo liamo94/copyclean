@@ -16,7 +16,7 @@ let sizes: [(Int, String)] = [
     (1024, "512@2x")
 ]
 
-let outputDir = "Pastedit/Assets.xcassets/AppIcon.appiconset"
+let outputDir = "CopyClean/Assets.xcassets/AppIcon.appiconset"
 
 // Create directory if needed
 try? FileManager.default.createDirectory(atPath: outputDir, withIntermediateDirectories: true)
