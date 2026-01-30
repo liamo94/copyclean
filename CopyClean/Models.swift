@@ -32,6 +32,7 @@ class HistoryManager: ObservableObject {
     }
     
     func addEntry(_ text: String) {
+        guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
         let entry = HistoryEntry(text: text)
         entries.insert(entry, at: 0)
         

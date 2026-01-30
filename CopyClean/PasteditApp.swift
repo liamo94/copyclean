@@ -89,13 +89,18 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         NSApp.setActivationPolicy(.accessory)
     }
     
+    func applicationWillTerminate(_ notification: Notification) {
+        if let monitor = keyEventMonitor {
+            NSEvent.removeMonitor(monitor)
+            keyEventMonitor = nil
+        }
+    }
+    
     func setupMenuBar() {
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         
         if let button = statusItem?.button {
             button.image = NSImage(systemSymbolName: "clipboard", accessibilityDescription: "Copy Clean")
-            button.action = #selector(menuBarIconClicked)
-            button.target = self
         }
         
         updateMenuShortcuts()
@@ -105,11 +110,14 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         let menu = NSMenu()
         
         let settings = SettingsManager.shared
-        let historyShortcut = settings.historyShortcut.displayString
-        let editorShortcut = settings.editorShortcut.displayString
         
-        menu.addItem(NSMenuItem(title: "Show History (\(historyShortcut))", action: #selector(showHistory), keyEquivalent: ""))
-        menu.addItem(NSMenuItem(title: "Quick Edit (\(editorShortcut))", action: #selector(showEditorFromMenu), keyEquivalent: ""))
+        let historyItem = NSMenuItem(title: "Show History", action: #selector(showHistory), keyEquivalent: settings.historyShortcut.keyEquivalent)
+        historyItem.keyEquivalentModifierMask = settings.historyShortcut.cocoaModifiers
+        menu.addItem(historyItem)
+        
+        let editorItem = NSMenuItem(title: "Quick Edit", action: #selector(showEditorFromMenu), keyEquivalent: settings.editorShortcut.keyEquivalent)
+        editorItem.keyEquivalentModifierMask = settings.editorShortcut.cocoaModifiers
+        menu.addItem(editorItem)
         menu.addItem(NSMenuItem.separator())
         menu.addItem(NSMenuItem(title: "Settings...", action: #selector(showSettings), keyEquivalent: ","))
         menu.addItem(NSMenuItem.separator())
@@ -118,15 +126,6 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         menu.addItem(NSMenuItem(title: "Quit", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q"))
         
         statusItem?.menu = menu
-    }
-    
-    @objc func menuBarIconClicked() {
-        // Right-click or option-click shows menu, regular click shows history
-        if NSApp.currentEvent?.modifierFlags.contains(.option) == true {
-            statusItem?.menu?.popUp(positioning: nil, at: NSEvent.mouseLocation, in: nil)
-        } else {
-            showHistory()
-        }
     }
     
     @objc func showEditorFromMenu() {
@@ -304,22 +303,27 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     }
     
     func closeHistory() {
-        historyWindow?.orderOut(nil)
+        historyWindow?.close()
+        historyWindow = nil
+        historyReturnAction = nil
+        historyCopyAction = nil
+        historyDeleteAction = nil
     }
     
     func showEditor() {
-        // Try to get highlighted text first
-        var textToEdit = ""
+        // If our editor is already key window, just use current clipboard
+        if editorWindow?.isKeyWindow == true {
+            editorViewModel.text = NSPasteboard.general.string(forType: .string) ?? ""
+            presentEditorWindow()
+            return
+        }
         
-        // Attempt to get selected text by simulating Cmd+C
-        let source = CGEventSource(stateID: .hidSystemState)
-        
-        // Save current clipboard
         let pasteboard = NSPasteboard.general
-        let savedClipboard = pasteboard.string(forType: .string)
+        let savedChangeCount = pasteboard.changeCount
         
-        // Simulate Cmd+C to copy selected text
-        let eventDown = CGEvent(keyboardEventSource: source, virtualKey: 0x08, keyDown: true) // C key
+        // Simulate Cmd+C to copy selected text from the frontmost app
+        let source = CGEventSource(stateID: .hidSystemState)
+        let eventDown = CGEvent(keyboardEventSource: source, virtualKey: 0x08, keyDown: true)
         eventDown?.flags = .maskCommand
         let eventUp = CGEvent(keyboardEventSource: source, virtualKey: 0x08, keyDown: false)
         eventUp?.flags = .maskCommand
@@ -327,26 +331,19 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         eventDown?.post(tap: .cghidEventTap)
         eventUp?.post(tap: .cghidEventTap)
         
-        // Small delay to let the copy complete
-        usleep(50000) // 50ms
-        
-        // Check if clipboard changed (meaning something was selected)
-        let newClipboard = pasteboard.string(forType: .string)
-        
-        if newClipboard != savedClipboard && newClipboard != nil && !newClipboard!.isEmpty {
-            // We successfully copied selected text
-            textToEdit = newClipboard!
-        } else {
-            // No selection, restore original clipboard and use it
-            if let saved = savedClipboard {
-                pasteboard.clearContents()
-                pasteboard.setString(saved, forType: .string)
+        // Wait for the copy to complete without blocking the main thread
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { [weak self] in
+            guard let self = self else { return }
+            
+            if pasteboard.changeCount != savedChangeCount,
+               let newText = pasteboard.string(forType: .string), !newText.isEmpty {
+                self.editorViewModel.text = newText
+            } else {
+                self.editorViewModel.text = pasteboard.string(forType: .string) ?? ""
             }
-            textToEdit = savedClipboard ?? ""
+            
+            self.presentEditorWindow()
         }
-        
-        editorViewModel.text = textToEdit
-        presentEditorWindow()
     }
     
     private func presentEditorWindow() {

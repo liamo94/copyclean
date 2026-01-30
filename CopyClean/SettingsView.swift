@@ -23,6 +23,21 @@ struct KeyboardShortcut: Codable, Equatable {
         return parts.joined()
     }
     
+    /// Lowercase character for use with NSMenuItem.keyEquivalent
+    var keyEquivalent: String {
+        keyCodeToString(keyCode)?.lowercased() ?? ""
+    }
+    
+    /// NSEvent modifier flags for use with NSMenuItem.keyEquivalentModifierMask
+    var cocoaModifiers: NSEvent.ModifierFlags {
+        var flags: NSEvent.ModifierFlags = []
+        if modifiers & UInt32(cmdKey) != 0 { flags.insert(.command) }
+        if modifiers & UInt32(shiftKey) != 0 { flags.insert(.shift) }
+        if modifiers & UInt32(optionKey) != 0 { flags.insert(.option) }
+        if modifiers & UInt32(controlKey) != 0 { flags.insert(.control) }
+        return flags
+    }
+    
     private func keyCodeToString(_ keyCode: UInt32) -> String? {
         let keyMap: [UInt32: String] = [
             0: "A", 1: "S", 2: "D", 3: "F", 4: "H", 5: "G", 6: "Z", 7: "X",
@@ -63,10 +78,10 @@ class SettingsManager: ObservableObject {
     private let pauseHistoryKey = "PauseHistory"
     
     init() {
-        // Default: Cmd+Shift+E for editor
-        let defaultEditor = KeyboardShortcut(keyCode: 14, modifiers: UInt32(cmdKey | shiftKey))
-        // Default: Cmd+Shift+H for history
-        let defaultHistory = KeyboardShortcut(keyCode: 4, modifiers: UInt32(cmdKey | shiftKey))
+        // Default: Ctrl+Opt+E for editor
+        let defaultEditor = KeyboardShortcut(keyCode: 14, modifiers: UInt32(controlKey | optionKey))
+        // Default: Ctrl+Opt+H for history
+        let defaultHistory = KeyboardShortcut(keyCode: 4, modifiers: UInt32(controlKey | optionKey))
         
         if let data = UserDefaults.standard.data(forKey: editorKey),
            let shortcut = try? JSONDecoder().decode(KeyboardShortcut.self, from: data) {
@@ -175,7 +190,6 @@ class ShortcutCaptureNSView: NSView {
 
 struct SettingsView: View {
     @ObservedObject var settings = SettingsManager.shared
-    @Environment(\.dismiss) var dismiss
     
     @State private var editorShortcut: KeyboardShortcut
     @State private var historyShortcut: KeyboardShortcut
@@ -244,7 +258,7 @@ struct SettingsView: View {
                 Spacer()
                 
                 Button("Cancel") {
-                    dismiss()
+                    NSApp.keyWindow?.close()
                 }
                 .keyboardShortcut(.escape, modifiers: [])
                 
@@ -252,7 +266,7 @@ struct SettingsView: View {
                     settings.editorShortcut = editorShortcut
                     settings.historyShortcut = historyShortcut
                     settings.save()
-                    dismiss()
+                    NSApp.keyWindow?.close()
                 }
                 .keyboardShortcut(.defaultAction)
                 .buttonStyle(.borderedProminent)

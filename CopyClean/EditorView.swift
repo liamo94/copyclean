@@ -116,16 +116,21 @@ struct EditorView: View {
                         
                         Button("Normalize Indentation") {
                             transform { text in
+                                let tabWidth = 4
+                                // Expand tabs to spaces for consistent measurement
                                 let lines = text.components(separatedBy: "\n")
+                                let expandedLines = lines.map { line -> String in
+                                    line.replacingOccurrences(of: "\t", with: String(repeating: " ", count: tabWidth))
+                                }
                                 // Find minimum indentation of non-empty lines
-                                let minIndent = lines
+                                let minIndent = expandedLines
                                     .filter { !$0.trimmingCharacters(in: .whitespaces).isEmpty }
                                     .map { line in
-                                        line.prefix(while: { $0 == " " || $0 == "\t" }).count
+                                        line.prefix(while: { $0 == " " }).count
                                     }
                                     .min() ?? 0
-                                // Remove that amount from each line
-                                return lines.map { line in
+                                // Remove that amount from each expanded line
+                                return expandedLines.map { line in
                                     if line.count >= minIndent {
                                         return String(line.dropFirst(minIndent))
                                     }
@@ -343,18 +348,17 @@ struct EditorView: View {
         let oldText = textView.string
         let newText = operation(oldText)
         
-        guard let undoManager = textView.undoManager else { return }
-        
-        // Disable automatic undo registration
+        // Disable automatic undo registration, ensure re-enable via defer
         textView.allowsUndo = false
+        defer { textView.allowsUndo = true }
         
         // Apply the change
         textView.string = newText
         viewModel.text = newText
         textView.setSelectedRange(NSRange(location: 0, length: 0))
         
-        // Re-enable undo
-        textView.allowsUndo = true
+        // Register undo if available
+        guard let undoManager = textView.undoManager else { return }
         
         // Capture viewModel for closures
         let vm = viewModel
@@ -397,12 +401,6 @@ struct CustomTextEditor: NSViewRepresentable {
         textView.autoresizingMask = [.width, .height]
         textView.delegate = context.coordinator
         
-        // Set background color for dark mode
-        if NSApp.effectiveAppearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua {
-            textView.backgroundColor = NSColor(red: 36/255.0, green: 40/255.0, blue: 44/255.0, alpha: 1.0)
-            textView.insertionPointColor = .white
-        }
-        
         // Disable automatic substitutions
         textView.isAutomaticQuoteSubstitutionEnabled = false
         textView.isAutomaticDashSubstitutionEnabled = false
@@ -420,9 +418,19 @@ struct CustomTextEditor: NSViewRepresentable {
     }
     
     func updateNSView(_ scrollView: NSScrollView, context: Context) {
+        context.coordinator.parent = self
         let textView = scrollView.documentView as! NSTextView
         if textView.string != text {
             textView.string = text
+        }
+        
+        // Update background color for current appearance
+        if NSApp.effectiveAppearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua {
+            textView.backgroundColor = NSColor(red: 36/255.0, green: 40/255.0, blue: 44/255.0, alpha: 1.0)
+            textView.insertionPointColor = .white
+        } else {
+            textView.backgroundColor = .textBackgroundColor
+            textView.insertionPointColor = .textColor
         }
     }
     
@@ -467,7 +475,7 @@ struct CustomTextEditor: NSViewRepresentable {
             
             // Check if selection spans multiple lines
             let selectedText = text.substring(with: selectedRange)
-            let isMultiline = selectedText.contains("\n") || selectedRange.length > 0
+            let isMultiline = selectedText.contains("\n")
             
             if isMultiline {
                 // Multi-line selection: indent/unindent all selected lines
@@ -499,10 +507,13 @@ struct CustomTextEditor: NSViewRepresentable {
                     textView.replaceCharacters(in: fullRange, with: newText)
                     textView.didChangeText()
                     
-                    // Restore selection
+                    // Restore selection with clamping to valid range
                     let lengthDiff = (newText as NSString).length - (selectedLines as NSString).length
-                    let newRange = NSRange(location: selectedRange.location, length: selectedRange.length + lengthDiff)
-                    textView.setSelectedRange(newRange)
+                    let textLength = (textView.string as NSString).length
+                    let newLocation = min(selectedRange.location, textLength)
+                    let newLength = max(0, selectedRange.length + lengthDiff)
+                    let clampedLength = min(newLength, textLength - newLocation)
+                    textView.setSelectedRange(NSRange(location: newLocation, length: clampedLength))
                 }
             } else {
                 // Single line or cursor: insert tab or perform unindent
