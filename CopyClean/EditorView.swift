@@ -22,7 +22,6 @@ class LineNumberGutterView: NSView {
     override func draw(_ dirtyRect: NSRect) {
         guard let textView = textView,
               let layoutManager = textView.layoutManager,
-              let textContainer = textView.textContainer,
               let scrollView = textView.enclosingScrollView else { return }
 
         let isDark = NSApp.effectiveAppearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
@@ -65,7 +64,7 @@ class LineNumberGutterView: NSView {
                 forCharacterRange: lineRange, actualCharacterRange: nil
             )
 
-            var lineRect = layoutManager.lineFragmentRect(
+            let lineRect = layoutManager.lineFragmentRect(
                 forGlyphAt: glyphRange.location, effectiveRange: nil
             )
             // Use only the first line fragment's y for the line number
