@@ -1,35 +1,103 @@
 import SwiftUI
 import AppKit
 
-struct LineNumberView: View {
-    let text: String
-    let fontSize: CGFloat
-    
-    private var lineCount: Int {
-        let lines = text.split(separator: "\n", omittingEmptySubsequences: false)
-        return max(lines.count, 1)
+class LineNumberGutterView: NSView {
+    weak var textView: NSTextView?
+    private let gutterWidth: CGFloat = 40
+
+    override var isFlipped: Bool { true }
+
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        wantsLayer = true
+        layer?.masksToBounds = true
     }
-    
-    private var lineHeight: CGFloat {
-        let font = NSFont.monospacedSystemFont(ofSize: fontSize, weight: .regular)
-        let layoutManager = NSLayoutManager()
-        return layoutManager.defaultLineHeight(for: font)
+
+    required init?(coder: NSCoder) {
+        super.init(coder: coder)
+        wantsLayer = true
+        layer?.masksToBounds = true
     }
-    
-    var body: some View {
-        ScrollView {
-            VStack(alignment: .trailing, spacing: 0) {
-                ForEach(1...lineCount, id: \.self) { lineNumber in
-                    Text("\(lineNumber)")
-                        .font(.system(size: fontSize, design: .monospaced))
-                        .foregroundColor(.secondary)
-                        .frame(height: lineHeight)
-                        .padding(.trailing, 8)
-                }
-            }
-            .padding(.top, 12)
+
+    override func draw(_ dirtyRect: NSRect) {
+        guard let textView = textView,
+              let layoutManager = textView.layoutManager,
+              let textContainer = textView.textContainer,
+              let scrollView = textView.enclosingScrollView else { return }
+
+        let isDark = NSApp.effectiveAppearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
+        let bgColor = isDark
+            ? NSColor(red: 36/255.0, green: 40/255.0, blue: 44/255.0, alpha: 1.0)
+            : NSColor.controlBackgroundColor
+        bgColor.setFill()
+        bounds.fill()
+
+        let font = textView.font ?? NSFont.monospacedSystemFont(ofSize: NSFont.systemFontSize, weight: .regular)
+        let attrs: [NSAttributedString.Key: Any] = [
+            .font: NSFont.monospacedSystemFont(ofSize: font.pointSize, weight: .regular),
+            .foregroundColor: NSColor.secondaryLabelColor
+        ]
+
+        let text = textView.string as NSString
+        let visibleRect = scrollView.contentView.bounds
+        let inset = textView.textContainerInset.height
+        let viewHeight = bounds.height
+
+        layoutManager.ensureLayout(forCharacterRange: NSRange(location: 0, length: text.length))
+
+        // Handle empty document
+        if text.length == 0 {
+            let numStr = "1" as NSString
+            let strSize = numStr.size(withAttributes: attrs)
+            numStr.draw(
+                at: NSPoint(x: gutterWidth - strSize.width - 8, y: inset - visibleRect.origin.y),
+                withAttributes: attrs
+            )
+            return
         }
-        .scrollDisabled(true)
+
+        // Walk every line in the document, draw only if visible
+        var lineNumber = 1
+        var charIdx = 0
+        while charIdx < text.length {
+            let lineRange = text.lineRange(for: NSRange(location: charIdx, length: 0))
+            let glyphRange = layoutManager.glyphRange(
+                forCharacterRange: lineRange, actualCharacterRange: nil
+            )
+
+            var lineRect = layoutManager.lineFragmentRect(
+                forGlyphAt: glyphRange.location, effectiveRange: nil
+            )
+            // Use only the first line fragment's y for the line number
+            let y = lineRect.origin.y + inset - visibleRect.origin.y
+
+            // Only draw if within visible gutter area
+            if y + lineRect.height >= 0 && y < viewHeight {
+                let numStr = "\(lineNumber)" as NSString
+                let strSize = numStr.size(withAttributes: attrs)
+                numStr.draw(at: NSPoint(x: gutterWidth - strSize.width - 8, y: y), withAttributes: attrs)
+            }
+
+            // Stop early if we're past the visible area
+            if y > viewHeight { break }
+
+            lineNumber += 1
+            charIdx = NSMaxRange(lineRange)
+        }
+
+        // Trailing empty line after final newline
+        if text.hasSuffix("\n") {
+            let lastGlyphIndex = max(0, layoutManager.numberOfGlyphs - 1)
+            let lastRect = layoutManager.lineFragmentRect(
+                forGlyphAt: lastGlyphIndex, effectiveRange: nil
+            )
+            let y = lastRect.maxY + inset - visibleRect.origin.y
+            if y + lastRect.height >= 0 && y < viewHeight {
+                let numStr = "\(lineNumber)" as NSString
+                let strSize = numStr.size(withAttributes: attrs)
+                numStr.draw(at: NSPoint(x: gutterWidth - strSize.width - 8, y: y), withAttributes: attrs)
+            }
+        }
     }
 }
 
@@ -39,13 +107,13 @@ struct EditorView: View {
     var onSave: () -> Void
     var onClose: () -> Void
     @FocusState private var isTextEditorFocused: Bool
+    @State private var keyMonitor: Any?
     @State private var textView: NSTextView?
     @State private var showFindBar = false
     @State private var findText = ""
     @State private var replaceText = ""
     @State private var matchCount = 0
     @FocusState private var isFindFieldFocused: Bool
-    @State private var fontSizeMonitor: Any?
     
     var body: some View {
         VStack(spacing: 0) {
@@ -94,21 +162,11 @@ struct EditorView: View {
                 Divider()
             }
             
-            // Editor area with line numbers
-            HStack(alignment: .top, spacing: 0) {
-                // Line numbers
-                LineNumberView(text: viewModel.text, fontSize: settings.fontSize)
-                    .frame(width: 40)
-                    .background(Color(nsColor: .controlBackgroundColor))
-                
-                Divider()
-                
-                // Custom text editor with tab support
-                CustomTextEditor(text: $viewModel.text, fontSize: settings.fontSize, onTextViewReady: { tv in
-                    textView = tv
-                })
-                .focused($isTextEditorFocused)
-            }
+            // Editor area with integrated line number ruler
+            CustomTextEditor(text: $viewModel.text, fontSize: settings.fontSize, onTextViewReady: { tv in
+                textView = tv
+            })
+            .focused($isTextEditorFocused)
             
             Divider()
             
@@ -242,32 +300,34 @@ struct EditorView: View {
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
                 isTextEditorFocused = true
             }
-            // Monitor for Cmd+Plus/Minus/0 font size shortcuts
-            fontSizeMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { event in
-                guard event.modifierFlags.contains(.command),
-                      !event.modifierFlags.contains(.shift),
-                      !event.modifierFlags.contains(.option) else {
-                    return event
+            // Monitor for font size and transform shortcuts
+            keyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [self] event in
+                let mods = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
+
+                // Cmd only (no shift/option/ctrl) — font size
+                if mods == .command {
+                    switch event.charactersIgnoringModifiers {
+                    case "=", "+":
+                        settings.fontSize = min(settings.fontSize + 1, 36)
+                        return nil
+                    case "-":
+                        settings.fontSize = max(settings.fontSize - 1, 9)
+                        return nil
+                    case "0":
+                        settings.fontSize = NSFont.systemFontSize
+                        return nil
+                    default:
+                        break
+                    }
                 }
-                switch event.charactersIgnoringModifiers {
-                case "=", "+":
-                    settings.fontSize = min(settings.fontSize + 1, 36)
-                    return nil
-                case "-":
-                    settings.fontSize = max(settings.fontSize - 1, 9)
-                    return nil
-                case "0":
-                    settings.fontSize = NSFont.systemFontSize
-                    return nil
-                default:
-                    return event
-                }
+
+                return event
             }
         }
         .onDisappear {
-            if let monitor = fontSizeMonitor {
+            if let monitor = keyMonitor {
                 NSEvent.removeMonitor(monitor)
-                fontSizeMonitor = nil
+                keyMonitor = nil
             }
         }
     }
@@ -424,11 +484,13 @@ struct CustomTextEditor: NSViewRepresentable {
     @Binding var text: String
     var fontSize: CGFloat
     var onTextViewReady: ((NSTextView) -> Void)?
-    
-    func makeNSView(context: Context) -> NSScrollView {
+
+    func makeNSView(context: Context) -> NSView {
+        let container = NSView()
+
         let scrollView = NSTextView.scrollableTextView()
         let textView = scrollView.documentView as! NSTextView
-        
+
         // Configure text view
         textView.isEditable = true
         textView.isSelectable = true
@@ -437,36 +499,83 @@ struct CustomTextEditor: NSViewRepresentable {
         textView.textContainerInset = NSSize(width: 12, height: 12)
         textView.autoresizingMask = [.width, .height]
         textView.delegate = context.coordinator
-        
+
         // Disable automatic substitutions
         textView.isAutomaticQuoteSubstitutionEnabled = false
         textView.isAutomaticDashSubstitutionEnabled = false
         textView.isAutomaticTextReplacementEnabled = false
-        
+
         // Set initial text
         textView.string = text
-        
+
+        // Setup line number gutter
+        let gutterView = LineNumberGutterView()
+        gutterView.textView = textView
+
+        // Layout with autolayout
+        gutterView.translatesAutoresizingMaskIntoConstraints = false
+        scrollView.translatesAutoresizingMaskIntoConstraints = false
+        container.addSubview(gutterView)
+        container.addSubview(scrollView)
+
+        NSLayoutConstraint.activate([
+            gutterView.leadingAnchor.constraint(equalTo: container.leadingAnchor),
+            gutterView.topAnchor.constraint(equalTo: container.topAnchor),
+            gutterView.bottomAnchor.constraint(equalTo: container.bottomAnchor),
+            gutterView.widthAnchor.constraint(equalToConstant: 40),
+            scrollView.leadingAnchor.constraint(equalTo: gutterView.trailingAnchor),
+            scrollView.trailingAnchor.constraint(equalTo: container.trailingAnchor),
+            scrollView.topAnchor.constraint(equalTo: container.topAnchor),
+            scrollView.bottomAnchor.constraint(equalTo: container.bottomAnchor),
+        ])
+
+        context.coordinator.gutterView = gutterView
+        context.coordinator.scrollView = scrollView
+
+        // Observe scrolling, text changes, and frame changes to redraw gutter
+        NotificationCenter.default.addObserver(
+            context.coordinator, selector: #selector(Coordinator.gutterNeedsRedraw),
+            name: NSView.boundsDidChangeNotification,
+            object: scrollView.contentView
+        )
+        NotificationCenter.default.addObserver(
+            context.coordinator, selector: #selector(Coordinator.gutterNeedsRedraw),
+            name: NSText.didChangeNotification,
+            object: textView
+        )
+        NotificationCenter.default.addObserver(
+            context.coordinator, selector: #selector(Coordinator.gutterNeedsRedraw),
+            name: NSView.frameDidChangeNotification,
+            object: scrollView
+        )
+
         // Provide reference to parent view
         DispatchQueue.main.async {
             onTextViewReady?(textView)
         }
-        
-        return scrollView
+
+        return container
     }
-    
-    func updateNSView(_ scrollView: NSScrollView, context: Context) {
+
+    func updateNSView(_ container: NSView, context: Context) {
         context.coordinator.parent = self
-        let textView = scrollView.documentView as! NSTextView
+        guard let scrollView = context.coordinator.scrollView,
+              let textView = scrollView.documentView as? NSTextView else { return }
         if textView.string != text {
             textView.string = text
+            let gutter = context.coordinator.gutterView
+            DispatchQueue.main.async {
+                gutter?.display()
+            }
         }
-        
+
         // Apply font size changes
         let newFont = NSFont.monospacedSystemFont(ofSize: fontSize, weight: .regular)
         if textView.font != newFont {
             textView.font = newFont
+            context.coordinator.gutterView?.needsDisplay = true
         }
-        
+
         // Update background color for current appearance
         if NSApp.effectiveAppearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua {
             textView.backgroundColor = NSColor(red: 36/255.0, green: 40/255.0, blue: 44/255.0, alpha: 1.0)
@@ -476,16 +585,22 @@ struct CustomTextEditor: NSViewRepresentable {
             textView.insertionPointColor = .textColor
         }
     }
-    
+
     func makeCoordinator() -> Coordinator {
         Coordinator(self)
     }
-    
+
     class Coordinator: NSObject, NSTextViewDelegate {
         var parent: CustomTextEditor
-        
+        var gutterView: LineNumberGutterView?
+        var scrollView: NSScrollView?
+
         init(_ parent: CustomTextEditor) {
             self.parent = parent
+        }
+
+        @objc func gutterNeedsRedraw() {
+            gutterView?.display()
         }
         
         func textDidChange(_ notification: Notification) {
