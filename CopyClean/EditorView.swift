@@ -641,18 +641,27 @@ struct CustomTextEditor: NSViewRepresentable {
                 
                 var modifiedLines: [String] = []
                 let lines = selectedLines.components(separatedBy: "\n")
-                
-                for line in lines {
-                    if reverse {
-                        // Remove one level of indentation (4 spaces or 1 tab)
-                        if line.hasPrefix("    ") {
-                            modifiedLines.append(String(line.dropFirst(4)))
-                        } else if line.hasPrefix("\t") {
+
+                if reverse {
+                    // Find minimum indentation across indented non-empty lines to outdent uniformly
+                    let indents = lines
+                        .filter { !$0.trimmingCharacters(in: .whitespaces).isEmpty }
+                        .map { line -> Int in
+                            if line.hasPrefix("\t") { return 1 }
+                            return line.prefix(while: { $0 == " " }).count
+                        }
+                        .filter { $0 > 0 }
+                    let toRemove = min(indents.min() ?? 0, 4)
+
+                    for line in lines {
+                        if line.hasPrefix("\t") {
                             modifiedLines.append(String(line.dropFirst()))
                         } else {
-                            modifiedLines.append(line)
+                            modifiedLines.append(String(line.dropFirst(min(line.prefix(while: { $0 == " " }).count, toRemove))))
                         }
-                    } else {
+                    }
+                } else {
+                    for line in lines {
                         // Add indentation (4 spaces)
                         modifiedLines.append("    " + line)
                     }
