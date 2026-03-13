@@ -6,6 +6,10 @@
 	objectVersion = 77;
 	objects = {
 
+/* Begin PBXBuildFile section */
+		AA000003AA0000AA000003AA /* Highlightr in Frameworks */ = {isa = PBXBuildFile; productRef = AA000002AA0000AA000002AA /* Highlightr */; };
+/* End PBXBuildFile section */
+
 /* Begin PBXFileReference section */
 		0C72C6EA2F2A714A006B1EAF /* CopyClean.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = CopyClean.app; sourceTree = BUILT_PRODUCTS_DIR; };
 /* End PBXFileReference section */
@@ -36,6 +40,7 @@
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				AA000003AA0000AA000003AA /* Highlightr in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -78,6 +83,7 @@
 			);
 			name = CopyClean;
 			packageProductDependencies = (
+				AA000002AA0000AA000002AA /* Highlightr */,
 			);
 			productName = CopyClean;
 			productReference = 0C72C6EA2F2A714A006B1EAF /* CopyClean.app */;
@@ -111,6 +117,9 @@
 			productRefGroup = 0C72C6EB2F2A714A006B1EAF /* Products */;
 			projectDirPath = "";
 			projectRoot = "";
+			packageReferences = (
+				AA000001AA0000AA000001AA /* XCRemoteSwiftPackageReference "Highlightr" */,
+			);
 			targets = (
 				0C72C6E92F2A714A006B1EAF /* CopyClean */,
 			);
@@ -136,6 +145,25 @@
 			runOnlyForDeploymentPostprocessing = 0;
 		};
 /* End PBXSourcesBuildPhase section */
+
+/* Begin XCRemoteSwiftPackageReference section */
+		AA000001AA0000AA000001AA /* XCRemoteSwiftPackageReference "Highlightr" */ = {
+			isa = XCRemoteSwiftPackageReference;
+			repositoryURL = "https://github.com/raspu/Highlightr.git";
+			requirement = {
+				kind = upToNextMajorVersion;
+				minimumVersion = 2.1.2;
+			};
+		};
+/* End XCRemoteSwiftPackageReference section */
+
+/* Begin XCSwiftPackageProductDependency section */
+		AA000002AA0000AA000002AA /* Highlightr */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = AA000001AA0000AA000001AA /* XCRemoteSwiftPackageReference "Highlightr" */;
+			productName = Highlightr;
+		};
+/* End XCSwiftPackageProductDependency section */
 
 /* Begin XCBuildConfiguration section */
 		0C72C6F32F2A714A006B1EAF /* Debug */ = {
