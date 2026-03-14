@@ -75,19 +75,25 @@ class SettingsManager: ObservableObject {
             UserDefaults.standard.set(pauseHistory, forKey: pauseHistoryKey)
         }
     }
-    
+    @Published var maxHistory: Int {
+        didSet {
+            UserDefaults.standard.set(maxHistory, forKey: maxHistoryKey)
+        }
+    }
+
     var onShortcutsChanged: (() -> Void)?
-    
+
     private let editorKey = "EditorShortcut"
     private let historyKey = "HistoryShortcut"
     private let pauseHistoryKey = "PauseHistory"
     private let fontSizeKey = "EditorFontSize"
+    private let maxHistoryKey = "MaxHistory"
     
     init() {
-        // Default: Ctrl+Opt+E for editor
-        let defaultEditor = KeyboardShortcut(keyCode: 14, modifiers: UInt32(controlKey | optionKey))
-        // Default: Ctrl+Opt+H for history
-        let defaultHistory = KeyboardShortcut(keyCode: 4, modifiers: UInt32(controlKey | optionKey))
+        // Default: Ctrl+Cmd+E for editor
+        let defaultEditor = KeyboardShortcut(keyCode: 14, modifiers: UInt32(controlKey | cmdKey))
+        // Default: Ctrl+Cmd+H for history
+        let defaultHistory = KeyboardShortcut(keyCode: 4, modifiers: UInt32(controlKey | cmdKey))
         
         if let data = UserDefaults.standard.data(forKey: editorKey),
            let shortcut = try? JSONDecoder().decode(KeyboardShortcut.self, from: data) {
@@ -104,9 +110,12 @@ class SettingsManager: ObservableObject {
         }
         
         pauseHistory = UserDefaults.standard.bool(forKey: pauseHistoryKey)
-        
+
         let storedFontSize = UserDefaults.standard.double(forKey: fontSizeKey)
         fontSize = storedFontSize > 0 ? CGFloat(storedFontSize) : NSFont.systemFontSize
+
+        let storedMax = UserDefaults.standard.integer(forKey: "MaxHistory")
+        maxHistory = storedMax > 0 ? storedMax : 100
     }
     
     func save() {
@@ -199,14 +208,16 @@ class ShortcutCaptureNSView: NSView {
 
 struct SettingsView: View {
     @ObservedObject var settings = SettingsManager.shared
-    
+
     @State private var editorShortcut: KeyboardShortcut
     @State private var historyShortcut: KeyboardShortcut
     @State private var showClearConfirm = false
-    
+    @State private var maxHistory: Int
+
     init() {
         _editorShortcut = State(initialValue: SettingsManager.shared.editorShortcut)
         _historyShortcut = State(initialValue: SettingsManager.shared.historyShortcut)
+        _maxHistory = State(initialValue: SettingsManager.shared.maxHistory)
     }
     
     var body: some View {
@@ -256,9 +267,17 @@ struct SettingsView: View {
                     Toggle("", isOn: $settings.pauseHistory)
                         .labelsHidden()
                 }
-                
+
                 Divider()
-                
+
+                HStack {
+                    Text("History Limit")
+                    Spacer()
+                    Stepper("\(maxHistory) entries", value: $maxHistory, in: 10...500, step: 10)
+                }
+
+                Divider()
+
                 HStack {
                     Text("Clear History")
                     Spacer()
@@ -293,6 +312,7 @@ struct SettingsView: View {
                 Button("Save") {
                     settings.editorShortcut = editorShortcut
                     settings.historyShortcut = historyShortcut
+                    settings.maxHistory = maxHistory
                     settings.save()
                     NSApp.keyWindow?.close()
                 }
@@ -302,6 +322,7 @@ struct SettingsView: View {
             .padding(.bottom, 20)
         }
         .padding()
-        .frame(width: 350, height: 430)
+        .frame(width: 350, height: 480)
+        .tint(AppTheme.tealSUI)
     }
 }

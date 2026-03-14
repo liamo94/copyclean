@@ -28,6 +28,8 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     var historyCopyAction: (() -> Void)?
     var historyDeleteAction: (() -> Void)?
     var keyEventMonitor: Any?
+    var clipboardTimer: Timer?
+    var lastClipboardChangeCount: Int = 0
     
     func applicationDidFinishLaunching(_ notification: Notification) {
         AppDelegate.shared = self
@@ -93,6 +95,12 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         
         // Hide dock icon for a cleaner utility app experience
         NSApp.setActivationPolicy(.accessory)
+
+        // Start clipboard auto-capture timer
+        lastClipboardChangeCount = NSPasteboard.general.changeCount
+        clipboardTimer = Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) { [weak self] _ in
+            self?.checkClipboard()
+        }
     }
     
     func applicationWillTerminate(_ notification: Notification) {
@@ -100,6 +108,19 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             NSEvent.removeMonitor(monitor)
             keyEventMonitor = nil
         }
+        clipboardTimer?.invalidate()
+        clipboardTimer = nil
+    }
+
+    func checkClipboard() {
+        let pasteboard = NSPasteboard.general
+        guard pasteboard.changeCount != lastClipboardChangeCount else { return }
+        lastClipboardChangeCount = pasteboard.changeCount
+        guard !SettingsManager.shared.pauseHistory,
+              let text = pasteboard.string(forType: .string),
+              !text.isEmpty,
+              text.count <= 100_000 else { return }
+        historyManager.addEntry(text)
     }
     
     func setupMenuBar() {
@@ -133,7 +154,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     }
     
     @objc func showEditorFromMenu() {
-        editorViewModel.text = NSPasteboard.general.string(forType: .string) ?? ""
+        editorViewModel.load(NSPasteboard.general.string(forType: .string) ?? "")
         presentEditorWindow()
     }
     
@@ -157,7 +178,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         let contentView = SettingsView()
         
         let window = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 350, height: 250),
+            contentRect: NSRect(x: 0, y: 0, width: 350, height: 480),
             styleMask: [.titled, .closable],
             backing: .buffered,
             defer: false
@@ -231,17 +252,24 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         var hotKeyID1 = EventHotKeyID()
         hotKeyID1.signature = OSType("QEDT".fourCharCodeValue)
         hotKeyID1.id = 1
-        RegisterEventHotKey(settings.editorShortcut.keyCode, settings.editorShortcut.modifiers, hotKeyID1, GetApplicationEventTarget(), 0, &hotKeyRef)
-        
+        let status1 = RegisterEventHotKey(settings.editorShortcut.keyCode, settings.editorShortcut.modifiers, hotKeyID1, GetApplicationEventTarget(), 0, &hotKeyRef)
+        if status1 != noErr {
+            DispatchQueue.main.async { self.showToast("⚠️ Quick Edit shortcut conflict") }
+        }
+
         var hotKeyID2 = EventHotKeyID()
         hotKeyID2.signature = OSType("HIST".fourCharCodeValue)
         hotKeyID2.id = 2
-        RegisterEventHotKey(settings.historyShortcut.keyCode, settings.historyShortcut.modifiers, hotKeyID2, GetApplicationEventTarget(), 0, &historyHotKeyRef)
+        let status2 = RegisterEventHotKey(settings.historyShortcut.keyCode, settings.historyShortcut.modifiers, hotKeyID2, GetApplicationEventTarget(), 0, &historyHotKeyRef)
+        if status2 != noErr {
+            DispatchQueue.main.async { self.showToast("⚠️ Show History shortcut conflict") }
+        }
     }
     
     @objc func showHistory() {
         closeEditor()
-        
+        closeSettings()
+
         historyWindow?.close()
         historyWindow = nil
         createHistoryWindow()
@@ -304,7 +332,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     }
     
     func loadEntryToEditor(_ entry: HistoryEntry) {
-        editorViewModel.text = entry.text
+        editorViewModel.load(entry.text)
         closeHistory()
         presentEditorWindow()
     }
@@ -318,9 +346,15 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     }
     
     func showEditor() {
-        // If our editor is already key window, just use current clipboard
+        // If our editor is already key window, don't reload — just focus it
         if editorWindow?.isKeyWindow == true {
-            editorViewModel.text = NSPasteboard.general.string(forType: .string) ?? ""
+            return
+        }
+
+        // If history is open, load current clipboard and show editor without simulating Cmd+C
+        // (simulating Cmd+C while history is frontmost would trigger the history copy action)
+        if historyWindow != nil {
+            editorViewModel.load(NSPasteboard.general.string(forType: .string) ?? "")
             presentEditorWindow()
             return
         }
@@ -341,21 +375,22 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         // Wait for the copy to complete without blocking the main thread
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { [weak self] in
             guard let self = self else { return }
-            
+
             if pasteboard.changeCount != savedChangeCount,
                let newText = pasteboard.string(forType: .string), !newText.isEmpty {
-                self.editorViewModel.text = newText
+                self.editorViewModel.load(newText)
             } else {
-                self.editorViewModel.text = pasteboard.string(forType: .string) ?? ""
+                self.editorViewModel.load(pasteboard.string(forType: .string) ?? "")
             }
-            
+
             self.presentEditorWindow()
         }
     }
     
     private func presentEditorWindow() {
         closeHistory()
-        
+        closeSettings()
+
         if let window = editorWindow {
             window.makeKeyAndOrderFront(nil)
             NSApp.activate(ignoringOtherApps: true)
@@ -400,17 +435,73 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         let pasteboard = NSPasteboard.general
         pasteboard.clearContents()
         pasteboard.setString(editorViewModel.text, forType: .string)
-        
+
         // Save to history (unless paused)
         if !SettingsManager.shared.pauseHistory {
             historyManager.addEntry(editorViewModel.text)
         }
-        
+
+        editorViewModel.markSaved()
         closeEditor()
+        showToast("Copied to clipboard")
+    }
+
+    func showToast(_ message: String) {
+        guard let screen = NSScreen.main else { return }
+
+        let panel = NSPanel(
+            contentRect: NSRect(x: 0, y: 0, width: 180, height: 30),
+            styleMask: [.borderless, .nonactivatingPanel],
+            backing: .buffered,
+            defer: false
+        )
+        panel.isOpaque = false
+        panel.backgroundColor = .clear
+        panel.level = .floating
+        panel.ignoresMouseEvents = true
+        panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
+
+        let toastView = NSHostingView(rootView:
+            Text(message)
+                .font(.system(size: 12, weight: .medium))
+                .foregroundColor(.white)
+                .padding(.horizontal, 10)
+                .padding(.vertical, 5)
+                .background(Color(red: 0.20, green: 0.78, blue: 0.60).opacity(0.95), in: RoundedRectangle(cornerRadius: 7))
+                .shadow(color: .black.opacity(0.2), radius: 4, y: 2)
+        )
+        panel.contentView = toastView
+
+        // Position top-right with margin
+        let margin: CGFloat = 16
+        let x = screen.visibleFrame.maxX - panel.frame.width - margin
+        let y = screen.visibleFrame.maxY - panel.frame.height - margin
+        panel.setFrameOrigin(NSPoint(x: x, y: y))
+
+        panel.alphaValue = 0
+        panel.orderFront(nil)
+
+        NSAnimationContext.runAnimationGroup { ctx in
+            ctx.duration = 0.2
+            panel.animator().alphaValue = 1
+        }
+
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) {
+            NSAnimationContext.runAnimationGroup({ ctx in
+                ctx.duration = 0.3
+                panel.animator().alphaValue = 0
+            }, completionHandler: {
+                panel.close()
+            })
+        }
     }
     
     func closeEditor() {
         editorWindow?.orderOut(nil)
+    }
+
+    func closeSettings() {
+        settingsWindow?.close()
     }
 }
 

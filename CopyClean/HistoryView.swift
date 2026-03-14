@@ -1,8 +1,6 @@
 import SwiftUI
 import AppKit
 
-private let appTeal    = Color(red: 0.165, green: 0.483, blue: 0.420)
-private let appTealNS  = NSColor(red: 0.165, green: 0.483, blue: 0.420, alpha: 1.0)
 
 private func formatRelativeDate(_ date: Date, style: RelativeDateTimeFormatter.UnitsStyle = .full) -> String {
     let formatter = RelativeDateTimeFormatter()
@@ -17,18 +15,28 @@ struct HistoryView: View {
 
     @State private var selectedEntry: HistoryEntry?
     @State private var searchText = ""
+    @State private var hoverCopy = false
+    @State private var hoverEdit = false
+    @State private var hoverDelete = false
 
     private var filteredEntries: [HistoryEntry] {
-        searchText.isEmpty
+        let base = searchText.isEmpty
             ? historyManager.entries
             : historyManager.entries.filter { $0.text.localizedCaseInsensitiveContains(searchText) }
+        // Pinned entries always shown first
+        return base.sorted { ($0.isPinned ? 0 : 1) < ($1.isPinned ? 0 : 1) }
     }
 
     var body: some View {
-        HStack(spacing: 0) {
-            sidebar
+        VStack(spacing: 0) {
+            HStack(spacing: 0) {
+                sidebar
+                Divider()
+                detailPane
+            }
+
             Divider()
-            detailPane
+            bottomBar
         }
         .frame(minWidth: 640, minHeight: 420)
         .onAppear {
@@ -42,6 +50,129 @@ struct HistoryView: View {
                 selectedEntry = filteredEntries.first
             }
         }
+    }
+
+    // MARK: - Bottom Bar
+
+    private var bottomBar: some View {
+        HStack(spacing: 0) {
+            // Left: timestamp + stats
+            if let entry = selectedEntry {
+                HStack(spacing: 10) {
+                    Text(formatRelativeDate(entry.timestamp, style: .abbreviated))
+                        .foregroundColor(.secondary)
+                        .font(.system(size: 12))
+
+                    barDivider
+
+                    statPill("\(entry.text.components(separatedBy: "\n").count)", label: "lines")
+                    statPill("\(entry.text.split { $0.isWhitespace || $0.isNewline }.count)", label: "words")
+                    statPill("\(entry.text.count)", label: "chars")
+                }
+                .padding(.horizontal, 14)
+            } else {
+                Spacer()
+            }
+
+            Spacer()
+
+            if selectedEntry != nil {
+                // Delete
+                Button {
+                    if let entry = selectedEntry { deleteEntry(entry) }
+                } label: {
+                    HStack(spacing: 6) {
+                        Image(systemName: "trash")
+                            .foregroundColor(hoverDelete ? .red.opacity(0.8) : .secondary.opacity(0.7))
+                            .font(.system(size: 11))
+                        Text("Delete")
+                            .foregroundColor(hoverDelete ? .primary : .primary.opacity(0.75))
+                            .font(.system(size: 12))
+                    }
+                    .padding(.horizontal, 6)
+                    .padding(.vertical, 3)
+                    .background(hoverDelete ? Color.red.opacity(0.08) : Color.clear)
+                    .cornerRadius(5)
+                }
+                .buttonStyle(.plain)
+                .padding(.horizontal, 8)
+                .onHover { hoverDelete = $0 }
+
+                barDivider
+
+                // Copy
+                Button {
+                    if let entry = selectedEntry { copyAndClose(entry) }
+                } label: {
+                    bottomAction("Copy", shortcut: "⌘C", hovered: hoverCopy)
+                }
+                .buttonStyle(.plain)
+                .keyboardShortcut("c", modifiers: .command)
+                .padding(.horizontal, 8)
+                .onHover { hoverCopy = $0 }
+
+                barDivider
+
+                // Edit
+                Button {
+                    if let entry = selectedEntry { onSelectEntry(entry) }
+                } label: {
+                    HStack(spacing: 6) {
+                        Text("Edit")
+                            .fontWeight(.medium)
+                            .foregroundColor(hoverEdit ? AppTheme.tealSUI : AppTheme.tealSUI.opacity(0.8))
+                        Text("↵")
+                            .font(.system(size: 10, weight: .medium))
+                            .foregroundColor(hoverEdit ? .secondary : .secondary.opacity(0.6))
+                    }
+                    .font(.system(size: 12))
+                    .padding(.horizontal, 6)
+                    .padding(.vertical, 3)
+                    .background(hoverEdit ? Color.secondary.opacity(0.12) : Color.clear)
+                    .cornerRadius(5)
+                }
+                .buttonStyle(.plain)
+                .padding(.horizontal, 8)
+                .onHover { hoverEdit = $0 }
+            }
+        }
+        .frame(height: 36)
+        .background(Color(nsColor: .windowBackgroundColor))
+    }
+
+    private var barDivider: some View {
+        Rectangle()
+            .fill(Color.secondary.opacity(0.2))
+            .frame(width: 1, height: 16)
+    }
+
+    @ViewBuilder
+    private func bottomAction(_ label: String, shortcut: String, hovered: Bool) -> some View {
+        HStack(alignment: .firstTextBaseline, spacing: 6) {
+            Text(label)
+                .foregroundColor(hovered ? .primary : .primary.opacity(0.75))
+            Text(shortcut)
+                .font(.system(size: 10, weight: .medium))
+                .foregroundColor(hovered ? .secondary : .secondary.opacity(0.6))
+        }
+        .font(.system(size: 12))
+        .fixedSize()
+        .padding(.horizontal, 6)
+        .padding(.vertical, 3)
+        .background(hovered ? Color.secondary.opacity(0.12) : Color.clear)
+        .cornerRadius(5)
+    }
+
+    @ViewBuilder
+    private func statPill(_ value: String, label: String) -> some View {
+        HStack(spacing: 3) {
+            Text(value)
+                .monospacedDigit()
+                .foregroundColor(AppTheme.tealSUI)
+            Text(label)
+                .foregroundColor(.secondary)
+        }
+        .font(.caption)
     }
 
     // MARK: - Sidebar
@@ -61,17 +192,30 @@ struct HistoryView: View {
             } else {
                 List(selection: $selectedEntry) {
                     ForEach(filteredEntries) { entry in
-                        HistoryEntryRow(entry: entry, isSelected: selectedEntry?.id == entry.id)
+                        let isSelected = selectedEntry?.id == entry.id
+                        HistoryEntryRow(entry: entry, isSelected: isSelected)
                             .tag(entry)
+                            .listRowBackground(
+                                isSelected
+                                    ? AppTheme.tealSUI.cornerRadius(6)
+                                    : Color.clear.cornerRadius(6)
+                            )
                             .contextMenu {
                                 Button("Copy to Clipboard") { copyAndClose(entry) }
                                 Button("Edit") { onSelectEntry(entry) }
+                                Divider()
+                                Button(entry.isPinned ? "Unpin" : "Pin") {
+                                    historyManager.togglePin(entry)
+                                }
                                 Divider()
                                 Button("Delete", role: .destructive) { deleteEntry(entry) }
                             }
                     }
                     .onDelete { indexSet in
-                        for index in indexSet { deleteEntry(filteredEntries[index]) }
+                        for index in indexSet {
+                            let entry = filteredEntries[index]
+                            deleteEntry(entry)
+                        }
                     }
                 }
                 .listStyle(.sidebar)
@@ -83,7 +227,7 @@ struct HistoryView: View {
     private var searchBar: some View {
         HStack(spacing: 8) {
             Image(systemName: "magnifyingglass")
-                .foregroundColor(appTeal)
+                .foregroundColor(AppTheme.tealSUI)
                 .imageScale(.small)
             TextField("Search history…", text: $searchText)
                 .textFieldStyle(.plain)
@@ -106,16 +250,12 @@ struct HistoryView: View {
     @ViewBuilder
     private var detailPane: some View {
         if let entry = selectedEntry {
-            VStack(spacing: 0) {
-                detailHeader(entry: entry)
-                Divider()
-                ScrollView {
-                    Text(entry.text)
-                        .font(.system(.body, design: .monospaced))
-                        .textSelection(.enabled)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .padding(16)
-                }
+            ScrollView {
+                Text(entry.text)
+                    .font(.system(.body, design: .monospaced))
+                    .textSelection(.enabled)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(16)
             }
         } else {
             emptyState(
@@ -126,57 +266,14 @@ struct HistoryView: View {
         }
     }
 
-    private func detailHeader(entry: HistoryEntry) -> some View {
-        HStack(alignment: .center, spacing: 12) {
-            VStack(alignment: .leading, spacing: 3) {
-                Text(formatRelativeDate(entry.timestamp))
-                    .font(.headline)
-                HStack(spacing: 8) {
-                    statLabel("\(entry.text.components(separatedBy: "\n").count)", icon: "line.3.horizontal")
-                    statLabel("\(entry.text.split { $0.isWhitespace || $0.isNewline }.count)", icon: "text.word.spacing")
-                    statLabel("\(entry.text.count)", icon: "character")
-                }
-            }
-
-            Spacer()
-
-            Button(action: { deleteEntry(entry) }) {
-                Image(systemName: "trash")
-            }
-            .buttonStyle(.borderless)
-            .foregroundColor(.secondary)
-
-            Button("Copy") { copyAndClose(entry) }
-
-            Button("Edit") { onSelectEntry(entry) }
-                .buttonStyle(.borderedProminent)
-                .tint(appTeal)
-        }
-        .padding(.horizontal, 16)
-        .padding(.vertical, 12)
-        .background(Color(nsColor: .controlBackgroundColor))
-    }
-
     // MARK: - Helpers
-
-    @ViewBuilder
-    private func statLabel(_ value: String, icon: String) -> some View {
-        HStack(spacing: 3) {
-            Image(systemName: icon)
-                .foregroundColor(appTeal.opacity(0.7))
-            Text(value)
-                .monospacedDigit()
-                .foregroundColor(.secondary)
-        }
-        .font(.caption)
-    }
 
     @ViewBuilder
     private func emptyState(icon: String, title: String, subtitle: String) -> some View {
         VStack(spacing: 10) {
             Image(systemName: icon)
                 .font(.system(size: 40, weight: .thin))
-                .foregroundColor(appTeal.opacity(0.5))
+                .foregroundColor(AppTheme.tealSUI.opacity(0.5))
             Text(title)
                 .font(.headline)
                 .foregroundColor(.secondary)
@@ -192,6 +289,7 @@ struct HistoryView: View {
         pasteboard.clearContents()
         pasteboard.setString(entry.text, forType: .string)
         onClose()
+        AppDelegate.shared?.showToast("Copied to clipboard")
     }
 
     private func syncSelectedEntry() {
@@ -258,8 +356,13 @@ struct HistoryEntryRow: View {
             }
 
             HStack(spacing: 4) {
+                if entry.isPinned {
+                    Image(systemName: "pin.fill")
+                        .font(.system(size: 9))
+                        .foregroundColor(AppTheme.tealSUI)
+                }
                 Circle()
-                    .fill(appTeal.opacity(isSelected ? 0.9 : 0.4))
+                    .fill(AppTheme.tealSUI.opacity(isSelected ? 0.9 : 0.4))
                     .frame(width: 5, height: 5)
                 Text(formatRelativeDate(entry.timestamp, style: .abbreviated))
                     .font(.caption2)

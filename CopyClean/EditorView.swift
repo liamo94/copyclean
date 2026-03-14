@@ -4,9 +4,9 @@ import Highlightr
 
 // MARK: - Theme
 
-private enum AppTheme {
-    static let teal    = NSColor(red: 0.165, green: 0.483, blue: 0.420, alpha: 1.0)
-    static let tealSUI = Color(red: 0.165, green: 0.483, blue: 0.420)
+enum AppTheme {
+    static let teal    = NSColor(red: 0.20, green: 0.78, blue: 0.60, alpha: 1.0)
+    static let tealSUI = Color(red: 0.20, green: 0.78, blue: 0.60)
     static let editorDarkBG = NSColor(red: 0.11, green: 0.13, blue: 0.13, alpha: 1.0)
     static let gutterDarkBG = NSColor(red: 0.09, green: 0.11, blue: 0.11, alpha: 1.0)
 }
@@ -95,6 +95,25 @@ struct EditorView: View {
     @FocusState private var isFindFieldFocused: Bool
     @State private var currentLanguage = "plaintext"
     @State private var showShortcuts = false
+    @State private var hoverTransform = false
+    @State private var hoverCancel = false
+    @State private var hoverSave = false
+    @State private var hoverKeyboard = false
+    @State private var hoverWordWrap = false
+
+    // Feature 1 – Cursor position
+    @State private var cursorLine: Int = 1
+    @State private var cursorColumn: Int = 1
+
+    // Feature 2 – Regex toggle
+    @State private var useRegex = false
+
+    // Feature 3 – Unsaved changes warning
+    @State private var showCancelAlert = false
+
+
+    // Feature 8 – Word wrap toggle
+    @State private var wordWrap = true
 
     private static let languages: [(label: String, id: String)] = [
         ("Auto-detect", "auto"),
@@ -135,9 +154,19 @@ struct EditorView: View {
                 Divider()
             }
 
-            CustomTextEditor(text: $viewModel.text, language: $currentLanguage, fontSize: settings.fontSize, onTextViewReady: { tv in
-                textView = tv
-            })
+            CustomTextEditor(
+                text: $viewModel.text,
+                language: $currentLanguage,
+                fontSize: settings.fontSize,
+                wordWrap: wordWrap,
+                onTextViewReady: { tv in
+                    textView = tv
+                },
+                onCursorChange: { line, col in
+                    cursorLine = line
+                    cursorColumn = col
+                }
+            )
             .focused($isTextEditorFocused)
 
             Divider()
@@ -159,6 +188,21 @@ struct EditorView: View {
             }
             keyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [self] event in
                 let mods = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
+
+                // When discard alert is open, intercept its shortcuts first
+                if showCancelAlert {
+                    if event.keyCode == 53 { // Escape
+                        showCancelAlert = false
+                        return nil
+                    }
+                    if mods == .command && event.charactersIgnoringModifiers == "d" {
+                        showCancelAlert = false
+                        closeFindBar()
+                        onClose()
+                        return nil
+                    }
+                    return nil // swallow all other keys while alert is open
+                }
 
                 if mods == .command {
                     switch event.charactersIgnoringModifiers {
@@ -211,6 +255,65 @@ struct EditorView: View {
                 keyMonitor = nil
             }
         }
+        .overlay {
+            if showCancelAlert {
+                ZStack {
+                    Color.black.opacity(0.35)
+                        .ignoresSafeArea()
+
+                    VStack(spacing: 0) {
+                        Divider()
+                        HStack(spacing: 0) {
+                            Text("Discard unsaved changes?")
+                                .font(.system(size: 12))
+                                .foregroundColor(.secondary)
+                                .padding(.horizontal, 14)
+
+                            Spacer()
+
+                            barDivider
+
+                            // Keep Editing
+                            Button { showCancelAlert = false } label: {
+                                bottomAction("Keep Editing", shortcut: "Esc")
+                            }
+                            .buttonStyle(.plain)
+                            .keyboardShortcut(.escape, modifiers: [])
+                            .padding(.horizontal, 8)
+
+                            barDivider
+
+                            // Discard
+                            Button {
+                                showCancelAlert = false
+                                closeFindBar()
+                                onClose()
+                            } label: {
+                                HStack(alignment: .firstTextBaseline, spacing: 6) {
+                                    Text("Discard")
+                                        .fontWeight(.medium)
+                                        .foregroundColor(.red.opacity(0.85))
+                                    Text("⌘D")
+                                        .font(.system(size: 10, weight: .medium))
+                                        .foregroundColor(.secondary)
+                                }
+                                .font(.system(size: 12))
+                                .fixedSize()
+                                .padding(.horizontal, 6)
+                                .padding(.vertical, 3)
+                                .cornerRadius(5)
+                            }
+                            .buttonStyle(.plain)
+                            .keyboardShortcut("d", modifiers: .command)
+                            .padding(.horizontal, 8)
+                        }
+                        .frame(height: 36)
+                        .background(Color(nsColor: .windowBackgroundColor))
+                    }
+                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottom)
+                }
+            }
+        }
     }
 
     // MARK: - Find Bar
@@ -226,7 +329,29 @@ struct EditorView: View {
                     .focused($isFindFieldFocused)
                     .onChange(of: findText) { highlightMatches() }
                     .onSubmit { findNext() }
-                if matchCount > 0 {
+                // Feature 2 – regex toggle button
+                Button {
+                    useRegex.toggle()
+                    highlightMatches()
+                } label: {
+                    Text(".*")
+                        .font(.system(size: 11, weight: .medium, design: .monospaced))
+                        .foregroundColor(useRegex ? .white : .secondary)
+                        .padding(.horizontal, 6)
+                        .padding(.vertical, 2)
+                        .background(useRegex ? AppTheme.tealSUI : Color.secondary.opacity(0.15), in: RoundedRectangle(cornerRadius: 4))
+                }
+                .buttonStyle(.borderless)
+                .help("Use Regular Expression")
+
+                if isInvalidRegex {
+                    Text("Invalid")
+                        .font(.caption)
+                        .foregroundColor(.white)
+                        .padding(.horizontal, 6)
+                        .padding(.vertical, 2)
+                        .background(Color.red.opacity(0.7), in: Capsule())
+                } else if matchCount > 0 {
                     Text("\(matchCount)")
                         .font(.caption.monospacedDigit())
                         .foregroundColor(.white)
@@ -270,17 +395,30 @@ struct EditorView: View {
     // MARK: - Bottom Bar
 
     private var bottomBar: some View {
-        HStack(spacing: 12) {
+        HStack(spacing: 0) {
+            // Feature 1 – cursor position
+            Text("\(cursorLine):\(cursorColumn)")
+                .font(.system(size: 12).monospacedDigit())
+                .foregroundColor(AppTheme.tealSUI)
+                .frame(width: 36, alignment: .leading)
+                .padding(.horizontal, 14)
+
+            barDivider
+
+            // Stats
             let stats = textStats
             HStack(spacing: 10) {
-                statPill(value: "\(stats.lines)", label: "lines")
-                statPill(value: "\(stats.words)", label: "words")
-                statPill(value: "\(stats.chars)", label: "chars")
+                statPill(value: "\(stats.lines)", label: "ln",  valueWidth: 18)
+                statPill(value: "\(stats.words)", label: "wd",  valueWidth: 24)
+                statPill(value: "\(stats.chars)", label: "ch",  valueWidth: 34)
             }
+            .fixedSize()
+            .padding(.horizontal, 10)
 
-            Spacer()
+            barDivider
 
-            Menu("Transform") {
+            // Transform menu
+            Menu {
                 Menu("Language: \(Self.languages.first { $0.id == currentLanguage }?.label ?? currentLanguage)") {
                     ForEach(Self.languages, id: \.id) { lang in
                         Button {
@@ -377,42 +515,173 @@ struct EditorView: View {
                         }
                     }
                 }
+
+                // Feature 9 – Line endings in Transform menu
+                Section("Line Endings") {
+                    Button("Convert to LF") {
+                        transform {
+                            $0.replacingOccurrences(of: "\r\n", with: "\n")
+                              .replacingOccurrences(of: "\r",   with: "\n")
+                        }
+                    }
+                    Button("Convert to CRLF") {
+                        transform {
+                            let lf = $0.replacingOccurrences(of: "\r\n", with: "\n")
+                                       .replacingOccurrences(of: "\r",   with: "\n")
+                            return lf.replacingOccurrences(of: "\n", with: "\r\n")
+                        }
+                    }
+                    Button("Convert to CR") {
+                        transform {
+                            let lf = $0.replacingOccurrences(of: "\r\n", with: "\n")
+                                       .replacingOccurrences(of: "\r",   with: "\n")
+                            return lf.replacingOccurrences(of: "\n", with: "\r")
+                        }
+                    }
+                }
+            } label: {
+                bottomAction("Transform", shortcut: "⌘T", hovered: hoverTransform)
+            }
+            .menuStyle(.borderlessButton)
+            .fixedSize()
+            .padding(.horizontal, 8)
+            .onHover { hoverTransform = $0 }
+
+            barDivider
+
+            Spacer()
+
+            // Feature 8 – Word wrap toggle
+            Button {
+                wordWrap.toggle()
+            } label: {
+                Image(systemName: "arrow.down.and.line.horizontal.and.arrow.up")
+                    .foregroundColor(wordWrap ? AppTheme.tealSUI : .secondary)
+                    .font(.system(size: 12))
+                    .padding(.horizontal, 6)
+                    .padding(.vertical, 3)
+                    .background(hoverWordWrap ? Color.secondary.opacity(0.12) : Color.clear)
+                    .cornerRadius(5)
+            }
+            .buttonStyle(.plain)
+            .padding(.horizontal, 4)
+            .onHover { hoverWordWrap = $0 }
+            .overlay(alignment: .top) {
+                if hoverWordWrap {
+                    Text(wordWrap ? "Word Wrap: On" : "Word Wrap: Off")
+                        .font(.caption)
+                        .foregroundColor(.primary)
+                        .padding(.horizontal, 8)
+                        .padding(.vertical, 4)
+                        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 6))
+                        .fixedSize()
+                        .offset(y: -30)
+                        .allowsHitTesting(false)
+                }
             }
 
-            Button("Cancel") {
+            barDivider
+
+            // Feature 3 – Cancel with unsaved-changes guard
+            Button {
                 closeFindBar()
-                onClose()
+                if viewModel.isDirty {
+                    showCancelAlert = true
+                } else {
+                    onClose()
+                }
+            } label: {
+                bottomAction("Cancel", shortcut: "Esc", hovered: hoverCancel)
             }
+            .buttonStyle(.plain)
             .keyboardShortcut(.escape, modifiers: [])
+            .padding(.horizontal, 8)
+            .onHover { hoverCancel = $0 }
 
-            Button("Save to Clipboard") { onSave() }
-                .keyboardShortcut("s", modifiers: .command)
-                .buttonStyle(.borderedProminent)
-                .tint(AppTheme.tealSUI)
-                .help("Save to Clipboard (⌘S)")
+            barDivider
 
+            // Save
+            Button {
+                onSave()
+            } label: {
+                HStack(alignment: .firstTextBaseline, spacing: 6) {
+                    Text("Save")
+                        .fontWeight(.medium)
+                        .foregroundColor(hoverSave ? AppTheme.tealSUI : AppTheme.tealSUI.opacity(0.8))
+                    shortcutBadge("⌘S", hovered: hoverSave)
+                }
+                .font(.system(size: 12))
+                .fixedSize()
+                .padding(.horizontal, 6)
+                .padding(.vertical, 3)
+                .background(hoverSave ? Color.secondary.opacity(0.12) : Color.clear)
+                .cornerRadius(5)
+            }
+            .buttonStyle(.plain)
+            .keyboardShortcut("s", modifiers: .command)
+            .padding(.horizontal, 8)
+            .onHover { hoverSave = $0 }
+
+            barDivider
+
+            // Shortcuts popover
             Button {
                 showShortcuts.toggle()
             } label: {
                 Image(systemName: "keyboard")
-                    .foregroundColor(showShortcuts ? AppTheme.tealSUI : .secondary)
+                    .foregroundColor(showShortcuts || hoverKeyboard ? AppTheme.tealSUI : .secondary)
+                    .font(.system(size: 12))
+                    .padding(.horizontal, 6)
+                    .padding(.vertical, 3)
+                    .background(hoverKeyboard ? Color.secondary.opacity(0.12) : Color.clear)
+                    .cornerRadius(5)
             }
-            .buttonStyle(.borderless)
+            .buttonStyle(.plain)
             .popover(isPresented: $showShortcuts, arrowEdge: .top) {
                 ShortcutsPopover()
             }
+            .padding(.horizontal, 8)
+            .onHover { hoverKeyboard = $0 }
         }
-        .padding(.horizontal, 14)
-        .padding(.vertical, 10)
+        .frame(height: 36)
         .background(Color(nsColor: .windowBackgroundColor))
     }
 
+    private var barDivider: some View {
+        Rectangle()
+            .fill(Color.secondary.opacity(0.2))
+            .frame(width: 1, height: 16)
+    }
+
     @ViewBuilder
-    private func statPill(value: String, label: String) -> some View {
+    private func bottomAction(_ label: String, shortcut: String, hovered: Bool = false) -> some View {
+        HStack(alignment: .firstTextBaseline, spacing: 6) {
+            Text(label)
+                .foregroundColor(hovered ? .primary : .primary.opacity(0.75))
+            shortcutBadge(shortcut, hovered: hovered)
+        }
+        .font(.system(size: 12))
+        .fixedSize()
+        .padding(.horizontal, 6)
+        .padding(.vertical, 3)
+        .background(hovered ? Color.secondary.opacity(0.12) : Color.clear)
+        .cornerRadius(5)
+    }
+
+    @ViewBuilder
+    private func shortcutBadge(_ text: String, hovered: Bool = false) -> some View {
+        Text(text)
+            .font(.system(size: 10, weight: .medium))
+            .foregroundColor(hovered ? .secondary : .secondary.opacity(0.6))
+    }
+
+    @ViewBuilder
+    private func statPill(value: String, label: String, valueWidth: CGFloat) -> some View {
         HStack(spacing: 3) {
             Text(value)
                 .monospacedDigit()
                 .foregroundColor(AppTheme.tealSUI)
+                .frame(width: valueWidth, alignment: .trailing)
             Text(label)
                 .foregroundColor(.secondary)
         }
@@ -420,6 +689,152 @@ struct EditorView: View {
     }
 
     // MARK: - Find Logic
+
+    /// Build an NSRegularExpression from the current findText, returning nil when invalid.
+    private func buildRegex() -> NSRegularExpression? {
+        guard useRegex, !findText.isEmpty else { return nil }
+        return try? NSRegularExpression(pattern: findText, options: .caseInsensitive)
+    }
+
+    private var isInvalidRegex: Bool {
+        guard useRegex, !findText.isEmpty else { return false }
+        return (try? NSRegularExpression(pattern: findText)) == nil
+    }
+
+    private func highlightMatches() {
+        guard let tv = textView, let storage = tv.textStorage else { return }
+        let fullRange = NSRange(location: 0, length: storage.length)
+        storage.removeAttribute(.backgroundColor, range: fullRange)
+
+        guard !findText.isEmpty else { matchCount = 0; return }
+
+        let nsText = tv.string as NSString
+        var count = 0
+
+        if useRegex {
+            guard let regex = buildRegex() else { matchCount = 0; return }
+            let matches = regex.matches(in: tv.string, range: NSRange(location: 0, length: nsText.length))
+            for m in matches {
+                storage.addAttribute(.backgroundColor, value: AppTheme.teal.withAlphaComponent(0.28), range: m.range)
+            }
+            count = matches.count
+        } else {
+            var searchRange = NSRange(location: 0, length: nsText.length)
+            while searchRange.location < nsText.length {
+                let range = nsText.range(of: findText, options: .caseInsensitive, range: searchRange)
+                if range.location == NSNotFound { break }
+                storage.addAttribute(.backgroundColor, value: AppTheme.teal.withAlphaComponent(0.28), range: range)
+                count += 1
+                searchRange.location = range.location + range.length
+                searchRange.length = nsText.length - searchRange.location
+            }
+        }
+        matchCount = count
+    }
+
+    private func findNext() {
+        guard let tv = textView, !findText.isEmpty else { return }
+        let nsText = tv.string as NSString
+        let currentPos = tv.selectedRange().location + tv.selectedRange().length
+
+        if useRegex {
+            guard let regex = buildRegex() else { return }
+            let fullLength = nsText.length
+            // Search from cursor to end, then wrap
+            for searchStart in [currentPos, 0] {
+                let searchRange = NSRange(location: searchStart, length: fullLength - searchStart)
+                if let m = regex.firstMatch(in: tv.string, range: searchRange) {
+                    tv.setSelectedRange(m.range)
+                    tv.scrollRangeToVisible(m.range)
+                    return
+                }
+            }
+        } else {
+            let text = nsText
+            var searchRange = NSRange(location: currentPos, length: text.length - currentPos)
+            var range = text.range(of: findText, options: .caseInsensitive, range: searchRange)
+            if range.location == NSNotFound {
+                searchRange = NSRange(location: 0, length: text.length)
+                range = text.range(of: findText, options: .caseInsensitive, range: searchRange)
+            }
+            if range.location != NSNotFound {
+                tv.setSelectedRange(range)
+                tv.scrollRangeToVisible(range)
+            }
+        }
+    }
+
+    private func findPrevious() {
+        guard let tv = textView, !findText.isEmpty else { return }
+        let nsText = tv.string as NSString
+        let currentPos = tv.selectedRange().location
+
+        if useRegex {
+            guard let regex = buildRegex() else { return }
+            let fullLength = nsText.length
+            // Collect all matches then find the last one before cursor
+            let allMatches = regex.matches(in: tv.string, range: NSRange(location: 0, length: fullLength))
+            let before = allMatches.filter { $0.range.location < currentPos }
+            let target = before.last ?? allMatches.last
+            if let m = target {
+                tv.setSelectedRange(m.range)
+                tv.scrollRangeToVisible(m.range)
+            }
+        } else {
+            let text = nsText
+            var searchRange = NSRange(location: 0, length: currentPos)
+            var range = text.range(of: findText, options: [.caseInsensitive, .backwards], range: searchRange)
+            if range.location == NSNotFound {
+                searchRange = NSRange(location: 0, length: text.length)
+                range = text.range(of: findText, options: [.caseInsensitive, .backwards], range: searchRange)
+            }
+            if range.location != NSNotFound {
+                tv.setSelectedRange(range)
+                tv.scrollRangeToVisible(range)
+            }
+        }
+    }
+
+    private func replaceCurrent() {
+        guard let tv = textView, !findText.isEmpty else { return }
+        let selectedRange = tv.selectedRange()
+        let selectedText = (tv.string as NSString).substring(with: selectedRange)
+
+        if useRegex {
+            guard let regex = buildRegex() else { return }
+            let fullSelected = NSRange(location: 0, length: (selectedText as NSString).length)
+            if regex.firstMatch(in: selectedText, range: fullSelected) != nil {
+                let replaced = regex.stringByReplacingMatches(in: selectedText, range: fullSelected, withTemplate: replaceText)
+                tv.insertText(replaced, replacementRange: selectedRange)
+                highlightMatches()
+            }
+        } else {
+            if selectedText.caseInsensitiveCompare(findText) == .orderedSame {
+                tv.insertText(replaceText, replacementRange: selectedRange)
+                highlightMatches()
+            }
+        }
+        findNext()
+    }
+
+    private func replaceAll() {
+        guard !findText.isEmpty else { return }
+        if useRegex {
+            guard let regex = buildRegex() else { return }
+            transform { text in
+                regex.stringByReplacingMatches(
+                    in: text,
+                    range: NSRange(location: 0, length: (text as NSString).length),
+                    withTemplate: replaceText
+                )
+            }
+        } else {
+            transform { text in
+                text.replacingOccurrences(of: findText, with: replaceText, options: .caseInsensitive)
+            }
+        }
+        highlightMatches()
+    }
 
     // MARK: - Line Operations
 
@@ -464,7 +879,6 @@ struct EditorView: View {
         let text = tv.string as NSString
         let (ls, le, ce, col) = lineExtents(in: tv)
         let currentLine = text.substring(with: NSRange(location: ls, length: ce - ls))
-        // Whether the current line has a trailing newline (le points past it, ce points before it)
         let currentHasNewline = le > ce
 
         if up {
@@ -472,8 +886,6 @@ struct EditorView: View {
             var pls = 0, ple = 0, pce = 0
             text.getLineStart(&pls, end: &ple, contentsEnd: &pce, for: NSRange(location: ls - 1, length: 0))
             let prevLine = text.substring(with: NSRange(location: pls, length: pce - pls))
-            // swapRange covers: prevLine+\n+currentLine+(optional \n)
-            // replacement must cover the same span
             let replacement = currentLine + "\n" + prevLine + (currentHasNewline ? "\n" : "")
             let swapRange = NSRange(location: pls, length: le - pls)
             if tv.shouldChangeText(in: swapRange, replacementString: replacement) {
@@ -487,7 +899,6 @@ struct EditorView: View {
             text.getLineStart(&nls, end: &nle, contentsEnd: &nce, for: NSRange(location: le, length: 0))
             let nextLine = text.substring(with: NSRange(location: nls, length: nce - nls))
             let nextHasNewline = nle > nce
-            // swapRange covers: currentLine+\n+nextLine+(optional \n)
             let replacement = nextLine + "\n" + currentLine + (nextHasNewline ? "\n" : "")
             let swapRange = NSRange(location: ls, length: nle - ls)
             if tv.shouldChangeText(in: swapRange, replacementString: replacement) {
@@ -509,78 +920,6 @@ struct EditorView: View {
         }
     }
 
-    private func highlightMatches() {
-        guard let tv = textView, let storage = tv.textStorage else { return }
-        let fullRange = NSRange(location: 0, length: storage.length)
-        storage.removeAttribute(.backgroundColor, range: fullRange)
-
-        guard !findText.isEmpty else { matchCount = 0; return }
-
-        let text = tv.string as NSString
-        var count = 0
-        var searchRange = NSRange(location: 0, length: text.length)
-
-        while searchRange.location < text.length {
-            let range = text.range(of: findText, options: .caseInsensitive, range: searchRange)
-            if range.location == NSNotFound { break }
-            storage.addAttribute(.backgroundColor, value: AppTheme.teal.withAlphaComponent(0.28), range: range)
-            count += 1
-            searchRange.location = range.location + range.length
-            searchRange.length = text.length - searchRange.location
-        }
-        matchCount = count
-    }
-
-    private func findNext() {
-        guard let tv = textView, !findText.isEmpty else { return }
-        let text = tv.string as NSString
-        let currentPos = tv.selectedRange().location + tv.selectedRange().length
-        var searchRange = NSRange(location: currentPos, length: text.length - currentPos)
-        var range = text.range(of: findText, options: .caseInsensitive, range: searchRange)
-        if range.location == NSNotFound {
-            searchRange = NSRange(location: 0, length: text.length)
-            range = text.range(of: findText, options: .caseInsensitive, range: searchRange)
-        }
-        if range.location != NSNotFound {
-            tv.setSelectedRange(range)
-            tv.scrollRangeToVisible(range)
-        }
-    }
-
-    private func findPrevious() {
-        guard let tv = textView, !findText.isEmpty else { return }
-        let text = tv.string as NSString
-        let currentPos = tv.selectedRange().location
-        var searchRange = NSRange(location: 0, length: currentPos)
-        var range = text.range(of: findText, options: [.caseInsensitive, .backwards], range: searchRange)
-        if range.location == NSNotFound {
-            searchRange = NSRange(location: 0, length: text.length)
-            range = text.range(of: findText, options: [.caseInsensitive, .backwards], range: searchRange)
-        }
-        if range.location != NSNotFound {
-            tv.setSelectedRange(range)
-            tv.scrollRangeToVisible(range)
-        }
-    }
-
-    private func replaceCurrent() {
-        guard let tv = textView, !findText.isEmpty else { return }
-        let selectedText = (tv.string as NSString).substring(with: tv.selectedRange())
-        if selectedText.caseInsensitiveCompare(findText) == .orderedSame {
-            tv.insertText(replaceText, replacementRange: tv.selectedRange())
-            highlightMatches()
-        }
-        findNext()
-    }
-
-    private func replaceAll() {
-        guard !findText.isEmpty else { return }
-        transform { text in
-            text.replacingOccurrences(of: findText, with: replaceText, options: .caseInsensitive)
-        }
-        highlightMatches()
-    }
-
     private func transform(_ operation: (String) -> String) {
         guard let textView = textView else {
             viewModel.text = operation(viewModel.text)
@@ -588,27 +927,32 @@ struct EditorView: View {
         }
         let oldText = textView.string
         let newText = operation(oldText)
-        textView.allowsUndo = false
-        defer { textView.allowsUndo = true }
-        textView.string = newText
-        viewModel.text = newText
-        textView.setSelectedRange(NSRange(location: 0, length: 0))
-        guard let undoManager = textView.undoManager else { return }
+        let savedRange = textView.selectedRange()
+        // Clamp saved range to new text length in case text got shorter
+        let clampedLocation = min(savedRange.location, (newText as NSString).length)
+        let clampedLength = min(savedRange.length, (newText as NSString).length - clampedLocation)
+        let restoredRange = NSRange(location: clampedLocation, length: clampedLength)
+
+        guard let undoManager = textView.undoManager else {
+            textView.allowsUndo = false
+            textView.string = newText
+            viewModel.text = newText
+            textView.allowsUndo = true
+            textView.setSelectedRange(restoredRange)
+            return
+        }
         let vm = viewModel
-        undoManager.registerUndo(withTarget: textView) { tv in
+        func apply(tv: NSTextView, to text: String, undoing revert: String, restoring range: NSRange) {
             tv.allowsUndo = false
-            tv.string = oldText
-            vm.text = oldText
-            tv.setSelectedRange(NSRange(location: 0, length: 0))
+            tv.string = text
+            vm.text = text
+            tv.setSelectedRange(range)
             tv.allowsUndo = true
-            undoManager.registerUndo(withTarget: tv) { tv2 in
-                tv2.allowsUndo = false
-                tv2.string = newText
-                vm.text = newText
-                tv2.setSelectedRange(NSRange(location: 0, length: 0))
-                tv2.allowsUndo = true
+            undoManager.registerUndo(withTarget: tv) { innerTv in
+                apply(tv: innerTv, to: revert, undoing: text, restoring: savedRange)
             }
         }
+        apply(tv: textView, to: newText, undoing: oldText, restoring: restoredRange)
     }
 }
 
@@ -618,10 +962,21 @@ struct CustomTextEditor: NSViewRepresentable {
     @Binding var text: String
     @Binding var language: String
     var fontSize: CGFloat
+    var wordWrap: Bool
     var onTextViewReady: ((NSTextView) -> Void)?
+    var onCursorChange: ((Int, Int) -> Void)?
 
     func makeNSView(context: Context) -> NSView {
-        let highlightr = Highlightr()!
+        guard let highlightr = Highlightr() else {
+            // Fallback: return a plain NSScrollView with a basic NSTextView
+            let tv = NSTextView()
+            tv.isEditable = true
+            tv.allowsUndo = true
+            let sv = NSScrollView()
+            sv.documentView = tv
+            sv.hasVerticalScroller = true
+            return sv
+        }
         let isDark = NSApp.effectiveAppearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
         highlightr.setTheme(to: isDark ? "atom-one-dark" : "xcode")
         highlightr.theme.setCodeFont(.monospacedSystemFont(ofSize: fontSize, weight: .regular))
@@ -661,8 +1016,6 @@ struct CustomTextEditor: NSViewRepresentable {
         scrollView.hasHorizontalScroller = false
         scrollView.autohidesScrollers = true
 
-        // Use NSRulerView — lives inside the scroll view, shares its coordinate system,
-        // and redraws as part of the scroll view's own display cycle (no layer ghosting).
         let rulerView = LineNumberRulerView(scrollView: scrollView, orientation: .verticalRuler)
         rulerView.clientView = textView
         rulerView.fontSize = fontSize
@@ -705,15 +1058,19 @@ struct CustomTextEditor: NSViewRepresentable {
         }
 
         let newFont = NSFont.monospacedSystemFont(ofSize: fontSize, weight: .regular)
-        if context.coordinator.rulerView?.fontSize != fontSize {
+        let fontChanged = context.coordinator.rulerView?.fontSize != fontSize
+        if fontChanged {
             context.coordinator.rulerView?.fontSize = fontSize
-            context.coordinator.highlightr?.theme.setCodeFont(newFont)
         }
 
         let isDark = NSApp.effectiveAppearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
         let theme = isDark ? "atom-one-dark" : "xcode"
-        if context.coordinator.highlightr?.theme.themeBackgroundColor != nil {
+        let themeChanged = context.coordinator.lastAppliedTheme != theme
+        if themeChanged {
+            context.coordinator.lastAppliedTheme = theme
             context.coordinator.highlightr?.setTheme(to: theme)
+        }
+        if themeChanged || fontChanged {
             context.coordinator.highlightr?.theme.setCodeFont(newFont)
         }
         if isDark {
@@ -722,6 +1079,47 @@ struct CustomTextEditor: NSViewRepresentable {
         } else {
             textView.backgroundColor = context.coordinator.highlightr?.theme.themeBackgroundColor ?? .textBackgroundColor
             textView.insertionPointColor = NSColor(AppTheme.tealSUI)
+        }
+
+        // Feature 8 – Word wrap
+        if wordWrap != context.coordinator.currentWordWrap {
+            context.coordinator.currentWordWrap = wordWrap
+            let rulerView = context.coordinator.rulerView
+            if wordWrap {
+                textView.isHorizontallyResizable = false
+                textView.autoresizingMask = [.width, .height]
+                scrollView.hasHorizontalScroller = false
+                // tile() updates the clip view dimensions but does NOT resize documentView.
+                // We must explicitly shrink the textView (which may have grown wide in OFF mode).
+                scrollView.tile()
+                // contentView.frame.width is the full scrollView width; ruler sits inside it.
+                let rulerWidth = scrollView.verticalRulerView?.frame.width ?? 0
+                let targetWidth = scrollView.contentView.frame.width - rulerWidth
+                var newFrame = textView.frame
+                newFrame.size.width = targetWidth
+                textView.frame = newFrame
+                // Seed the container width; widthTracksTextView keeps it in sync on future resizes.
+                let inset = textView.textContainerInset
+                textView.textContainer?.containerSize = NSSize(
+                    width: max(targetWidth - inset.width * 2, 0),
+                    height: .greatestFiniteMagnitude
+                )
+                textView.textContainer?.widthTracksTextView = true
+            } else {
+                textView.isHorizontallyResizable = true
+                textView.autoresizingMask = []
+                textView.textContainer?.widthTracksTextView = false
+                textView.textContainer?.containerSize = NSSize(
+                    width: CGFloat.greatestFiniteMagnitude,
+                    height: CGFloat.greatestFiniteMagnitude
+                )
+                scrollView.hasHorizontalScroller = true
+            }
+            textView.layoutManager?.invalidateLayout(
+                forCharacterRange: NSRange(location: 0, length: textView.string.utf16.count),
+                actualCharacterRange: nil
+            )
+            rulerView?.needsDisplay = true
         }
     }
 
@@ -733,8 +1131,15 @@ struct CustomTextEditor: NSViewRepresentable {
         var scrollView: NSScrollView?
         var highlightr: Highlightr?
         var codeStorage: CodeAttributedString?
+        var lastAppliedTheme: String?
+        // Feature 8
+        var currentWordWrap: Bool = true
 
         init(_ parent: CustomTextEditor) { self.parent = parent }
+
+        deinit {
+            NotificationCenter.default.removeObserver(self)
+        }
 
         func detectAndApplyLanguage(for text: String) {
             guard let codeStorage, !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
@@ -812,6 +1217,24 @@ struct CustomTextEditor: NSViewRepresentable {
             parent.text = textView.string
         }
 
+        // Feature 1 – cursor position
+        func textViewDidChangeSelection(_ notification: Notification) {
+            guard let textView = notification.object as? NSTextView else { return }
+            let nsText = textView.string as NSString
+            let loc = textView.selectedRange().location
+            let safeLen = min(loc, nsText.length)
+            let prefix = nsText.substring(with: NSRange(location: 0, length: safeLen))
+            let lineNum = prefix.components(separatedBy: "\n").count
+
+            // Find start of the current line
+            var lineStart = 0, lineEnd = 0, contentsEnd = 0
+            nsText.getLineStart(&lineStart, end: &lineEnd, contentsEnd: &contentsEnd,
+                                for: NSRange(location: safeLen, length: 0))
+            let col = loc - lineStart + 1
+
+            parent.onCursorChange?(lineNum, col)
+        }
+
         func textView(_ textView: NSTextView, doCommandBy commandSelector: Selector) -> Bool {
             if commandSelector == #selector(NSResponder.insertTab(_:)) {
                 handleTab(textView: textView, reverse: false)
@@ -825,7 +1248,6 @@ struct CustomTextEditor: NSViewRepresentable {
                 var lineStart = 0, lineEnd = 0, contentsEnd = 0
                 text.getLineStart(&lineStart, end: &lineEnd, contentsEnd: &contentsEnd, for: selected)
                 if selected.length == 0 && selected.location == lineStart && lineStart > 0 {
-                    // At start of line — delete the newline to merge with the line above
                     let range = NSRange(location: lineStart - 1, length: 1)
                     if textView.shouldChangeText(in: range, replacementString: "") {
                         textView.replaceCharacters(in: range, with: "")
