@@ -3,9 +3,9 @@ import AppKit
 import Carbon
 
 @main
-struct CopyCleanApp: App {
+struct MangleApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) var appDelegate
-    
+
     var body: some Scene {
         Settings {
             EmptyView()
@@ -30,36 +30,37 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     var keyEventMonitor: Any?
     var clipboardTimer: Timer?
     var lastClipboardChangeCount: Int = 0
-    
+
     func applicationDidFinishLaunching(_ notification: Notification) {
         AppDelegate.shared = self
-        
+
         // Setup settings callback
         SettingsManager.shared.onShortcutsChanged = { [weak self] in
             self?.reregisterHotkeys()
             self?.updateMenuShortcuts()
         }
-        
+
         // Listen for clear-history requests from Settings UI
         NotificationCenter.default.addObserver(
             self, selector: #selector(clearHistory),
             name: .clearHistory, object: nil
         )
-        
+
         // Register global hotkeys
         registerGlobalHotkey()
-        
+
         // Create menu bar icon
         setupMenuBar()
-        
+
         // Suppress beep sounds for unhandled keys in history window
         keyEventMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
             guard let self = self,
                   self.historyWindow?.isKeyWindow == true else {
                 return event
             }
-            // Escape -> close history
-            if event.keyCode == 53 {
+            // Escape or Cmd+W -> close history
+            if event.keyCode == 53 ||
+               (event.keyCode == 13 && event.modifierFlags.contains(.command)) {
                 self.historyWindow?.close()
                 self.historyWindow = nil
                 return nil
@@ -92,7 +93,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             // Swallow everything else silently
             return nil
         }
-        
+
         // Hide dock icon for a cleaner utility app experience
         NSApp.setActivationPolicy(.accessory)
 
@@ -102,7 +103,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             self?.checkClipboard()
         }
     }
-    
+
     func applicationWillTerminate(_ notification: Notification) {
         if let monitor = keyEventMonitor {
             NSEvent.removeMonitor(monitor)
@@ -122,50 +123,58 @@ class AppDelegate: NSObject, NSApplicationDelegate {
               text.count <= 100_000 else { return }
         historyManager.addEntry(text)
     }
-    
+
     func setupMenuBar() {
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
-        
+
         if let button = statusItem?.button {
-            button.image = NSImage(systemSymbolName: "clipboard", accessibilityDescription: "Copy Clean")
+            if let img = NSImage(named: "MenuBarIcon") {
+                img.isTemplate = true
+                img.size = NSSize(width: 18, height: 18)
+                button.image = img
+            } else {
+                button.image = NSImage(systemSymbolName: "curlybraces", accessibilityDescription: "Mangle")
+            }
         }
-        
+
         updateMenuShortcuts()
     }
-    
+
     func updateMenuShortcuts() {
         let menu = NSMenu()
-        
+
         let settings = SettingsManager.shared
-        
-        let historyItem = NSMenuItem(title: "Show History", action: #selector(showHistory), keyEquivalent: settings.historyShortcut.keyEquivalent)
-        historyItem.keyEquivalentModifierMask = settings.historyShortcut.cocoaModifiers
-        menu.addItem(historyItem)
-        
-        let editorItem = NSMenuItem(title: "Quick Edit", action: #selector(showEditorFromMenu), keyEquivalent: settings.editorShortcut.keyEquivalent)
+
+        let editorItem = NSMenuItem(title: "Open Editor", action: #selector(showEditorFromMenu), keyEquivalent: settings.editorShortcut.keyEquivalent)
         editorItem.keyEquivalentModifierMask = settings.editorShortcut.cocoaModifiers
         menu.addItem(editorItem)
+
+        let historyItem = NSMenuItem(title: "Recent Snippets", action: #selector(showHistory), keyEquivalent: settings.historyShortcut.keyEquivalent)
+        historyItem.keyEquivalentModifierMask = settings.historyShortcut.cocoaModifiers
+        menu.addItem(historyItem)
         menu.addItem(NSMenuItem.separator())
         menu.addItem(NSMenuItem(title: "Settings...", action: #selector(showSettings), keyEquivalent: ","))
         menu.addItem(NSMenuItem.separator())
         menu.addItem(NSMenuItem(title: "Quit", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q"))
-        
+
         statusItem?.menu = menu
     }
-    
+
     @objc func showEditorFromMenu() {
         editorViewModel.load(NSPasteboard.general.string(forType: .string) ?? "")
+        editorViewModel.sourceEntryID = nil
+        editorViewModel.languageIsManual = false
         presentEditorWindow()
     }
-    
+
     @objc func clearHistory() {
         historyManager.clearHistory()
     }
-    
+
     @objc func showSettings() {
         closeEditor()
         closeHistory()
-        
+
         if let window = settingsWindow {
             window.makeKeyAndOrderFront(nil)
             NSApp.activate(ignoringOtherApps: true)
@@ -173,34 +182,34 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             createSettingsWindow()
         }
     }
-    
+
     func createSettingsWindow() {
         let contentView = SettingsView()
-        
+
         let window = NSWindow(
             contentRect: NSRect(x: 0, y: 0, width: 350, height: 480),
             styleMask: [.titled, .closable],
             backing: .buffered,
             defer: false
         )
-        
+
         window.center()
-        window.title = "Copy Clean Settings"
+        window.title = "Mangle Settings"
         window.contentView = NSHostingView(rootView: contentView)
         window.isReleasedWhenClosed = false
-        
+
         self.settingsWindow = window
         window.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
     }
-    
+
     func registerGlobalHotkey() {
         // Only install the event handler once
         if !eventHandlerInstalled {
             var eventType = EventTypeSpec()
             eventType.eventClass = OSType(kEventClassKeyboard)
             eventType.eventKind = OSType(kEventHotKeyPressed)
-            
+
             InstallEventHandler(
                 GetApplicationEventTarget(),
                 { (nextHandler, theEvent, userData) -> OSStatus in
@@ -212,15 +221,15 @@ class AppDelegate: NSObject, NSApplicationDelegate {
                                       MemoryLayout<EventHotKeyID>.size,
                                       nil,
                                       &hotKeyID)
-                    
+
                     let appDelegate = Unmanaged<AppDelegate>.fromOpaque(userData!).takeUnretainedValue()
-                    
+
                     if hotKeyID.id == 1 {
                         appDelegate.showEditor()
                     } else if hotKeyID.id == 2 {
                         appDelegate.showHistory()
                     }
-                    
+
                     return noErr
                 },
                 1,
@@ -230,10 +239,10 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             )
             eventHandlerInstalled = true
         }
-        
+
         registerHotkeys()
     }
-    
+
     func reregisterHotkeys() {
         if let ref = hotKeyRef {
             UnregisterEventHotKey(ref)
@@ -245,10 +254,10 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         }
         registerHotkeys()
     }
-    
+
     private func registerHotkeys() {
         let settings = SettingsManager.shared
-        
+
         var hotKeyID1 = EventHotKeyID()
         hotKeyID1.signature = OSType("QEDT".fourCharCodeValue)
         hotKeyID1.id = 1
@@ -265,7 +274,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             DispatchQueue.main.async { self.showToast("⚠️ Show History shortcut conflict") }
         }
     }
-    
+
     @objc func showHistory() {
         closeEditor()
         closeSettings()
@@ -274,7 +283,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         historyWindow = nil
         createHistoryWindow()
     }
-    
+
     func createHistoryWindow() {
         let contentView = HistoryView(
             historyManager: historyManager,
@@ -285,25 +294,25 @@ class AppDelegate: NSObject, NSApplicationDelegate {
                 self?.closeHistory()
             }
         )
-        
+
         let window = NSWindow(
             contentRect: NSRect(x: 0, y: 0, width: 700, height: 500),
             styleMask: [.titled, .closable, .resizable],
             backing: .buffered,
             defer: false
         )
-        
+
         window.center()
-        window.title = "Copy Clean History"
+        window.title = "Recent Snippets"
         window.contentView = NSHostingView(rootView: contentView)
         window.level = .floating
         window.isReleasedWhenClosed = false
         window.minSize = NSSize(width: 600, height: 400)
-        
+
         self.historyWindow = window
         window.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
-        
+
         // Focus the list so first entry is highlighted
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
             if let tableView = self.findTableView(in: window.contentView) {
@@ -311,7 +320,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             }
         }
     }
-    
+
     func findSubview<T: NSView>(ofType type: T.Type, in view: NSView?) -> T? {
         guard let view = view else { return nil }
         if let match = view as? T { return match }
@@ -322,21 +331,26 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         }
         return nil
     }
-    
+
     func findTableView(in view: NSView?) -> NSTableView? {
         findSubview(ofType: NSTableView.self, in: view)
     }
-    
+
     func findTextView(in view: NSView?) -> NSTextView? {
         findSubview(ofType: NSTextView.self, in: view)
     }
-    
+
     func loadEntryToEditor(_ entry: HistoryEntry) {
         editorViewModel.load(entry.text)
+        editorViewModel.sourceEntryID = entry.id
+        editorViewModel.languageIsManual = entry.language != nil
+        if let lang = entry.language {
+            editorViewModel.currentLanguage = lang
+        }
         closeHistory()
         presentEditorWindow()
     }
-    
+
     func closeHistory() {
         historyWindow?.close()
         historyWindow = nil
@@ -344,7 +358,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         historyCopyAction = nil
         historyDeleteAction = nil
     }
-    
+
     func showEditor() {
         // If our editor is already key window, don't reload — just focus it
         if editorWindow?.isKeyWindow == true {
@@ -358,20 +372,20 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             presentEditorWindow()
             return
         }
-        
+
         let pasteboard = NSPasteboard.general
         let savedChangeCount = pasteboard.changeCount
-        
+
         // Simulate Cmd+C to copy selected text from the frontmost app
         let source = CGEventSource(stateID: .hidSystemState)
         let eventDown = CGEvent(keyboardEventSource: source, virtualKey: 0x08, keyDown: true)
         eventDown?.flags = .maskCommand
         let eventUp = CGEvent(keyboardEventSource: source, virtualKey: 0x08, keyDown: false)
         eventUp?.flags = .maskCommand
-        
+
         eventDown?.post(tap: .cghidEventTap)
         eventUp?.post(tap: .cghidEventTap)
-        
+
         // Wait for the copy to complete without blocking the main thread
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { [weak self] in
             guard let self = self else { return }
@@ -386,7 +400,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             self.presentEditorWindow()
         }
     }
-    
+
     private func presentEditorWindow() {
         closeHistory()
         closeSettings()
@@ -397,7 +411,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         } else {
             createEditorWindow()
         }
-        
+
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
             if let window = self.editorWindow,
                let textView = self.findTextView(in: window.contentView) {
@@ -405,42 +419,48 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             }
         }
     }
-    
+
     func createEditorWindow() {
         let contentView = EditorView(viewModel: editorViewModel, onSave: { [weak self] in
             self?.saveToClipboard()
         }, onClose: { [weak self] in
             self?.closeEditor()
         })
-        
+
         let window = NSWindow(
             contentRect: NSRect(x: 0, y: 0, width: 680, height: 480),
             styleMask: [.titled, .closable, .resizable],
             backing: .buffered,
             defer: false
         )
-        
+
         window.center()
-        window.title = "Copy Clean"
+        window.title = "Mangle"
         window.contentView = NSHostingView(rootView: contentView)
         window.level = .floating
         window.isReleasedWhenClosed = false
-        
+
         self.editorWindow = window
         window.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
     }
-    
+
     func saveToClipboard() {
         let pasteboard = NSPasteboard.general
         pasteboard.clearContents()
         pasteboard.setString(editorViewModel.text, forType: .string)
+
+        // Persist manually-set language back to the source history entry
+        if let sourceID = editorViewModel.sourceEntryID, editorViewModel.languageIsManual {
+            historyManager.updateLanguage(for: sourceID, language: editorViewModel.currentLanguage)
+        }
 
         // Save to history (unless paused)
         if !SettingsManager.shared.pauseHistory {
             historyManager.addEntry(editorViewModel.text)
         }
 
+        editorViewModel.sourceEntryID = nil
         editorViewModel.markSaved()
         closeEditor()
         showToast("Copied to clipboard")
@@ -495,7 +515,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             })
         }
     }
-    
+
     func closeEditor() {
         editorWindow?.orderOut(nil)
     }

@@ -16,9 +16,9 @@
             <BuildableReference
                BuildableIdentifier = "primary"
                BlueprintIdentifier = "0C72C6E92F2A714A006B1EAF"
-               BuildableName = "CopyClean.app"
-               BlueprintName = "CopyClean"
-               ReferencedContainer = "container:CopyClean.xcodeproj">
+               BuildableName = "Mangle.app"
+               BlueprintName = "Mangle"
+               ReferencedContainer = "container:Mangle.xcodeproj">
             </BuildableReference>
          </BuildActionEntry>
       </BuildActionEntries>
@@ -45,9 +45,9 @@
          <BuildableReference
             BuildableIdentifier = "primary"
             BlueprintIdentifier = "0C72C6E92F2A714A006B1EAF"
-            BuildableName = "CopyClean.app"
-            BlueprintName = "CopyClean"
-            ReferencedContainer = "container:CopyClean.xcodeproj">
+            BuildableName = "Mangle.app"
+            BlueprintName = "Mangle"
+            ReferencedContainer = "container:Mangle.xcodeproj">
          </BuildableReference>
       </BuildableProductRunnable>
    </LaunchAction>
@@ -62,9 +62,9 @@
          <BuildableReference
             BuildableIdentifier = "primary"
             BlueprintIdentifier = "0C72C6E92F2A714A006B1EAF"
-            BuildableName = "CopyClean.app"
-            BlueprintName = "CopyClean"
-            ReferencedContainer = "container:CopyClean.xcodeproj">
+            BuildableName = "Mangle.app"
+            BlueprintName = "Mangle"
+            ReferencedContainer = "container:Mangle.xcodeproj">
          </BuildableReference>
       </BuildableProductRunnable>
    </ProfileAction>

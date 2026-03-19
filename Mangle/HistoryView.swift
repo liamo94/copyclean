@@ -1,5 +1,6 @@
 import SwiftUI
 import AppKit
+import Highlightr
 
 
 private func formatRelativeDate(_ date: Date, style: RelativeDateTimeFormatter.UnitsStyle = .full) -> String {
@@ -250,13 +251,8 @@ struct HistoryView: View {
     @ViewBuilder
     private var detailPane: some View {
         if let entry = selectedEntry {
-            ScrollView {
-                Text(entry.text)
-                    .font(.system(.body, design: .monospaced))
-                    .textSelection(.enabled)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .padding(16)
-            }
+            let lang = entry.language ?? CustomTextEditor.Coordinator.guessLanguage(entry.text)
+            SyntaxPreviewView(text: entry.text, language: lang)
         } else {
             emptyState(
                 icon: "sidebar.left",
@@ -342,6 +338,21 @@ struct HistoryEntryRow: View {
         return String(second.prefix(60))
     }
 
+    private var detectedLanguage: String {
+        entry.language ?? CustomTextEditor.Coordinator.guessLanguage(entry.text)
+    }
+
+    private var languageLabel: String {
+        switch detectedLanguage {
+        case "plaintext":   return ""
+        case "javascript":  return "JS"
+        case "typescript":  return "TS"
+        case "xml":         return "HTML"
+        case "cpp":         return "C++"
+        default:            return detectedLanguage.prefix(1).uppercased() + detectedLanguage.dropFirst()
+        }
+    }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 3) {
             Text(preview)
@@ -367,8 +378,88 @@ struct HistoryEntryRow: View {
                 Text(formatRelativeDate(entry.timestamp, style: .abbreviated))
                     .font(.caption2)
                     .foregroundColor(.secondary)
+                if !languageLabel.isEmpty {
+                    Text("·")
+                        .font(.caption2)
+                        .foregroundColor(.secondary.opacity(0.5))
+                    Text(languageLabel)
+                        .font(.system(size: 9, weight: entry.language != nil ? .semibold : .regular))
+                        .foregroundColor(entry.language != nil
+                            ? (isSelected ? AppTheme.tealSUI.opacity(0.9) : AppTheme.tealSUI)
+                            : .secondary)
+                }
             }
         }
         .padding(.vertical, 4)
+    }
+}
+
+// MARK: - Syntax Preview
+
+struct SyntaxPreviewView: NSViewRepresentable {
+    let text: String
+    let language: String
+
+    class Coordinator {
+        var highlightr: Highlightr?
+        var codeStorage: CodeAttributedString?
+
+        init() {
+            guard let h = Highlightr() else { return }
+            let isDark = NSApp.effectiveAppearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
+            h.setTheme(to: isDark ? "atom-one-dark" : "xcode")
+            h.theme.setCodeFont(.monospacedSystemFont(ofSize: 12, weight: .regular))
+            self.highlightr = h
+            self.codeStorage = CodeAttributedString(highlightr: h)
+        }
+    }
+
+    func makeCoordinator() -> Coordinator { Coordinator() }
+
+    func makeNSView(context: Context) -> NSScrollView {
+        let coordinator = context.coordinator
+        let textStorage = coordinator.codeStorage ?? NSTextStorage()
+
+        let layoutManager = NSLayoutManager()
+        textStorage.addLayoutManager(layoutManager)
+
+        let textContainer = NSTextContainer(size: NSSize(width: 0, height: CGFloat.greatestFiniteMagnitude))
+        textContainer.widthTracksTextView = true
+        layoutManager.addTextContainer(textContainer)
+
+        let textView = NSTextView(frame: .zero, textContainer: textContainer)
+        textView.isEditable = false
+        textView.isSelectable = true
+        textView.isRichText = true
+        textView.textContainerInset = NSSize(width: 16, height: 16)
+        textView.autoresizingMask = NSView.AutoresizingMask.width
+        textView.isAutomaticQuoteSubstitutionEnabled = false
+
+        let isDark = NSApp.effectiveAppearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
+        if isDark, let bg = coordinator.highlightr?.theme.themeBackgroundColor {
+            textView.backgroundColor = bg
+        }
+
+        let scrollView = NSScrollView()
+        scrollView.documentView = textView
+        scrollView.hasVerticalScroller = true
+        scrollView.autohidesScrollers = true
+        if isDark, let bg = coordinator.highlightr?.theme.themeBackgroundColor {
+            scrollView.backgroundColor = bg
+        }
+
+        return scrollView
+    }
+
+    func updateNSView(_ scrollView: NSScrollView, context: Context) {
+        guard let storage = context.coordinator.codeStorage else {
+            (scrollView.documentView as? NSTextView)?.string = text
+            return
+        }
+        let lang = language == "plaintext" ? "plaintext" : language
+        if storage.language != lang { storage.language = lang }
+        if storage.string != text {
+            storage.replaceCharacters(in: NSRange(location: 0, length: storage.length), with: text)
+        }
     }
 }

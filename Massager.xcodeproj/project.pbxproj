@@ -11,26 +11,13 @@
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
-		0C72C6EA2F2A714A006B1EAF /* CopyClean.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = CopyClean.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		0C72C6EA2F2A714A006B1EAF /* Mangle.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = Mangle.app; sourceTree = BUILT_PRODUCTS_DIR; };
 /* End PBXFileReference section */
 
-/* Begin PBXFileSystemSynchronizedBuildFileExceptionSet section */
-		0CEA5A572F2E4E4F00E1FF2D /* Exceptions for "CopyClean" folder in "CopyClean" target */ = {
-			isa = PBXFileSystemSynchronizedBuildFileExceptionSet;
-			membershipExceptions = (
-				Info.plist,
-			);
-			target = 0C72C6E92F2A714A006B1EAF /* CopyClean */;
-		};
-/* End PBXFileSystemSynchronizedBuildFileExceptionSet section */
-
 /* Begin PBXFileSystemSynchronizedRootGroup section */
-		0C72C6EC2F2A714A006B1EAF /* CopyClean */ = {
+		0C72C6EC2F2A714A006B1EAF /* Mangle */ = {
 			isa = PBXFileSystemSynchronizedRootGroup;
-			exceptions = (
-				0CEA5A572F2E4E4F00E1FF2D /* Exceptions for "CopyClean" folder in "CopyClean" target */,
-			);
-			path = CopyClean;
+			path = Mangle;
 			sourceTree = "<group>";
 		};
 /* End PBXFileSystemSynchronizedRootGroup section */
@@ -50,7 +37,7 @@
 		0C72C6E12F2A714A006B1EAF = {
 			isa = PBXGroup;
 			children = (
-				0C72C6EC2F2A714A006B1EAF /* CopyClean */,
+				0C72C6EC2F2A714A006B1EAF /* Mangle */,
 				0C72C6EB2F2A714A006B1EAF /* Products */,
 			);
 			sourceTree = "<group>";
@@ -58,7 +45,7 @@
 		0C72C6EB2F2A714A006B1EAF /* Products */ = {
 			isa = PBXGroup;
 			children = (
-				0C72C6EA2F2A714A006B1EAF /* CopyClean.app */,
+				0C72C6EA2F2A714A006B1EAF /* Mangle.app */,
 			);
 			name = Products;
 			sourceTree = "<group>";
@@ -66,9 +53,9 @@
 /* End PBXGroup section */
 
 /* Begin PBXNativeTarget section */
-		0C72C6E92F2A714A006B1EAF /* CopyClean */ = {
+		0C72C6E92F2A714A006B1EAF /* Mangle */ = {
 			isa = PBXNativeTarget;
-			buildConfigurationList = 0C72C6F52F2A714A006B1EAF /* Build configuration list for PBXNativeTarget "CopyClean" */;
+			buildConfigurationList = 0C72C6F52F2A714A006B1EAF /* Build configuration list for PBXNativeTarget "Mangle" */;
 			buildPhases = (
 				0C72C6E62F2A714A006B1EAF /* Sources */,
 				0C72C6E72F2A714A006B1EAF /* Frameworks */,
@@ -79,14 +66,14 @@
 			dependencies = (
 			);
 			fileSystemSynchronizedGroups = (
-				0C72C6EC2F2A714A006B1EAF /* CopyClean */,
+				0C72C6EC2F2A714A006B1EAF /* Mangle */,
 			);
-			name = CopyClean;
+			name = Mangle;
 			packageProductDependencies = (
 				AA000002AA0000AA000002AA /* Highlightr */,
 			);
-			productName = CopyClean;
-			productReference = 0C72C6EA2F2A714A006B1EAF /* CopyClean.app */;
+			productName = Mangle;
+			productReference = 0C72C6EA2F2A714A006B1EAF /* Mangle.app */;
 			productType = "com.apple.product-type.application";
 		};
 /* End PBXNativeTarget section */
@@ -104,7 +91,7 @@
 					};
 				};
 			};
-			buildConfigurationList = 0C72C6E52F2A714A006B1EAF /* Build configuration list for PBXProject "CopyClean" */;
+			buildConfigurationList = 0C72C6E52F2A714A006B1EAF /* Build configuration list for PBXProject "Massager" */;
 			developmentRegion = en;
 			hasScannedForEncodings = 0;
 			knownRegions = (
@@ -113,15 +100,15 @@
 			);
 			mainGroup = 0C72C6E12F2A714A006B1EAF;
 			minimizedProjectReferenceProxies = 1;
+			packageReferences = (
+				AA000001AA0000AA000001AA /* XCRemoteSwiftPackageReference "Highlightr" */,
+			);
 			preferredProjectObjectVersion = 77;
 			productRefGroup = 0C72C6EB2F2A714A006B1EAF /* Products */;
 			projectDirPath = "";
 			projectRoot = "";
-			packageReferences = (
-				AA000001AA0000AA000001AA /* XCRemoteSwiftPackageReference "Highlightr" */,
-			);
 			targets = (
-				0C72C6E92F2A714A006B1EAF /* CopyClean */,
+				0C72C6E92F2A714A006B1EAF /* Mangle */,
 			);
 		};
 /* End PBXProject section */
@@ -145,25 +132,6 @@
 			runOnlyForDeploymentPostprocessing = 0;
 		};
 /* End PBXSourcesBuildPhase section */
-
-/* Begin XCRemoteSwiftPackageReference section */
-		AA000001AA0000AA000001AA /* XCRemoteSwiftPackageReference "Highlightr" */ = {
-			isa = XCRemoteSwiftPackageReference;
-			repositoryURL = "https://github.com/raspu/Highlightr.git";
-			requirement = {
-				kind = upToNextMajorVersion;
-				minimumVersion = 2.1.2;
-			};
-		};
-/* End XCRemoteSwiftPackageReference section */
-
-/* Begin XCSwiftPackageProductDependency section */
-		AA000002AA0000AA000002AA /* Highlightr */ = {
-			isa = XCSwiftPackageProductDependency;
-			package = AA000001AA0000AA000001AA /* XCRemoteSwiftPackageReference "Highlightr" */;
-			productName = Highlightr;
-		};
-/* End XCSwiftPackageProductDependency section */
 
 /* Begin XCBuildConfiguration section */
 		0C72C6F32F2A714A006B1EAF /* Debug */ = {
@@ -296,10 +264,10 @@
 				ENABLE_PREVIEWS = YES;
 				ENABLE_USER_SELECTED_FILES = readonly;
 				GENERATE_INFOPLIST_FILE = YES;
-				INFOPLIST_FILE = CopyClean/Info.plist;
-				INFOPLIST_KEY_CFBundleDisplayName = CopyClean;
+				INFOPLIST_FILE = Mangle/Info.plist;
+				INFOPLIST_KEY_CFBundleDisplayName = Mangle;
 				INFOPLIST_KEY_ITSAppUsesNonExemptEncryption = NO;
-				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.utilities";
+				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.developer-tools";
 				"INFOPLIST_KEY_UIApplicationSceneManifest_Generation[sdk=iphoneos*]" = YES;
 				"INFOPLIST_KEY_UIApplicationSceneManifest_Generation[sdk=iphonesimulator*]" = YES;
 				"INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents[sdk=iphoneos*]" = YES;
@@ -314,7 +282,7 @@
 				"LD_RUNPATH_SEARCH_PATHS[sdk=macosx*]" = "@executable_path/../Frameworks";
 				MACOSX_DEPLOYMENT_TARGET = 26.2;
 				MARKETING_VERSION = 1.0;
-				PRODUCT_BUNDLE_IDENTIFIER = liamo.co.copyclean;
+				PRODUCT_BUNDLE_IDENTIFIER = liamo.co.mangle;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				REGISTER_APP_GROUPS = YES;
 				SDKROOT = auto;
@@ -343,10 +311,10 @@
 				ENABLE_PREVIEWS = YES;
 				ENABLE_USER_SELECTED_FILES = readonly;
 				GENERATE_INFOPLIST_FILE = YES;
-				INFOPLIST_FILE = CopyClean/Info.plist;
-				INFOPLIST_KEY_CFBundleDisplayName = CopyClean;
+				INFOPLIST_FILE = Mangle/Info.plist;
+				INFOPLIST_KEY_CFBundleDisplayName = Mangle;
 				INFOPLIST_KEY_ITSAppUsesNonExemptEncryption = NO;
-				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.utilities";
+				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.developer-tools";
 				"INFOPLIST_KEY_UIApplicationSceneManifest_Generation[sdk=iphoneos*]" = YES;
 				"INFOPLIST_KEY_UIApplicationSceneManifest_Generation[sdk=iphonesimulator*]" = YES;
 				"INFOPLIST_KEY_UIApplicationSupportsIndirectInputEvents[sdk=iphoneos*]" = YES;
@@ -361,7 +329,7 @@
 				"LD_RUNPATH_SEARCH_PATHS[sdk=macosx*]" = "@executable_path/../Frameworks";
 				MACOSX_DEPLOYMENT_TARGET = 26.2;
 				MARKETING_VERSION = 1.0;
-				PRODUCT_BUNDLE_IDENTIFIER = liamo.co.copyclean;
+				PRODUCT_BUNDLE_IDENTIFIER = liamo.co.mangle;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				REGISTER_APP_GROUPS = YES;
 				SDKROOT = auto;
@@ -379,7 +347,7 @@
 /* End XCBuildConfiguration section */
 
 /* Begin XCConfigurationList section */
-		0C72C6E52F2A714A006B1EAF /* Build configuration list for PBXProject "CopyClean" */ = {
+		0C72C6E52F2A714A006B1EAF /* Build configuration list for PBXProject "Massager" */ = {
 			isa = XCConfigurationList;
 			buildConfigurations = (
 				0C72C6F32F2A714A006B1EAF /* Debug */,
@@ -388,7 +356,7 @@
 			defaultConfigurationIsVisible = 0;
 			defaultConfigurationName = Release;
 		};
-		0C72C6F52F2A714A006B1EAF /* Build configuration list for PBXNativeTarget "CopyClean" */ = {
+		0C72C6F52F2A714A006B1EAF /* Build configuration list for PBXNativeTarget "Mangle" */ = {
 			isa = XCConfigurationList;
 			buildConfigurations = (
 				0C72C6F62F2A714A006B1EAF /* Debug */,
@@ -398,6 +366,25 @@
 			defaultConfigurationName = Release;
 		};
 /* End XCConfigurationList section */
+
+/* Begin XCRemoteSwiftPackageReference section */
+		AA000001AA0000AA000001AA /* XCRemoteSwiftPackageReference "Highlightr" */ = {
+			isa = XCRemoteSwiftPackageReference;
+			repositoryURL = "https://github.com/raspu/Highlightr.git";
+			requirement = {
+				kind = upToNextMajorVersion;
+				minimumVersion = 2.1.2;
+			};
+		};
+/* End XCRemoteSwiftPackageReference section */
+
+/* Begin XCSwiftPackageProductDependency section */
+		AA000002AA0000AA000002AA /* Highlightr */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = AA000001AA0000AA000001AA /* XCRemoteSwiftPackageReference "Highlightr" */;
+			productName = Highlightr;
+		};
+/* End XCSwiftPackageProductDependency section */
 	};
 	rootObject = 0C72C6E22F2A714A006B1EAF /* Project object */;
 }

@@ -6,21 +6,24 @@ struct HistoryEntry: Identifiable, Codable, Hashable {
     let text: String
     let timestamp: Date
     var isPinned: Bool
+    var language: String? // nil = auto-detect; set when user manually picks a language
 
-    init(id: UUID = UUID(), text: String, timestamp: Date = Date(), isPinned: Bool = false) {
+    init(id: UUID = UUID(), text: String, timestamp: Date = Date(), isPinned: Bool = false, language: String? = nil) {
         self.id = id
         self.text = text
         self.timestamp = timestamp
         self.isPinned = isPinned
+        self.language = language
     }
 
-    // Custom decoder for backwards compatibility – isPinned may be absent in old data
+    // Custom decoder for backwards compatibility – isPinned/language may be absent in old data
     init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         id        = try container.decode(UUID.self,   forKey: .id)
         text      = try container.decode(String.self, forKey: .text)
         timestamp = try container.decode(Date.self,   forKey: .timestamp)
-        isPinned  = (try container.decodeIfPresent(Bool.self, forKey: .isPinned)) ?? false
+        isPinned  = (try container.decodeIfPresent(Bool.self,   forKey: .isPinned)) ?? false
+        language  =  try container.decodeIfPresent(String.self, forKey: .language)
     }
 
     // Hashable conformance
@@ -35,7 +38,7 @@ struct HistoryEntry: Identifiable, Codable, Hashable {
 
 class HistoryManager: ObservableObject {
     @Published var entries: [HistoryEntry] = []
-    private let saveKey = "CopyCleanHistory"
+    private let saveKey = "MangleHistory"
 
     init() {
         loadHistory()
@@ -78,6 +81,13 @@ class HistoryManager: ObservableObject {
         }
     }
 
+    func updateLanguage(for id: UUID, language: String) {
+        if let idx = entries.firstIndex(where: { $0.id == id }) {
+            entries[idx].language = language
+            saveHistory()
+        }
+    }
+
     private func saveHistory() {
         if let encoded = try? JSONEncoder().encode(entries) {
             UserDefaults.standard.set(encoded, forKey: saveKey)
@@ -95,7 +105,10 @@ class HistoryManager: ObservableObject {
 // ViewModel for editor state
 class EditorViewModel: ObservableObject {
     @Published var text: String = ""
+    @Published var currentLanguage: String = "plaintext"
     var baseText: String = ""
+    var languageIsManual: Bool = false  // true when user explicitly picked a language
+    var sourceEntryID: UUID? = nil      // set when editing an existing history entry
 
     var isDirty: Bool { text != baseText }
 

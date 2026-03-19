@@ -80,6 +80,11 @@ class SettingsManager: ObservableObject {
             UserDefaults.standard.set(maxHistory, forKey: maxHistoryKey)
         }
     }
+    @Published var tabSize: Int {
+        didSet {
+            UserDefaults.standard.set(tabSize, forKey: tabSizeKey)
+        }
+    }
 
     var onShortcutsChanged: (() -> Void)?
 
@@ -88,6 +93,7 @@ class SettingsManager: ObservableObject {
     private let pauseHistoryKey = "PauseHistory"
     private let fontSizeKey = "EditorFontSize"
     private let maxHistoryKey = "MaxHistory"
+    private let tabSizeKey = "TabSize"
     
     init() {
         // Default: Ctrl+Cmd+E for editor
@@ -116,6 +122,9 @@ class SettingsManager: ObservableObject {
 
         let storedMax = UserDefaults.standard.integer(forKey: "MaxHistory")
         maxHistory = storedMax > 0 ? storedMax : 100
+
+        let storedTabSize = UserDefaults.standard.integer(forKey: "TabSize")
+        tabSize = storedTabSize > 0 ? storedTabSize : 4
     }
     
     func save() {
@@ -278,6 +287,22 @@ struct SettingsView: View {
 
                 Divider()
 
+                Divider()
+
+                HStack {
+                    Text("Tab Size")
+                    Spacer()
+                    Picker("", selection: $settings.tabSize) {
+                        Text("2 spaces").tag(2)
+                        Text("4 spaces").tag(4)
+                    }
+                    .pickerStyle(.segmented)
+                    .labelsHidden()
+                    .frame(width: 140)
+                }
+
+                Divider()
+
                 HStack {
                     Text("Clear History")
                     Spacer()
@@ -322,7 +347,7 @@ struct SettingsView: View {
             .padding(.bottom, 20)
         }
         .padding()
-        .frame(width: 350, height: 480)
+        .frame(width: 350, height: 540)
         .tint(AppTheme.tealSUI)
     }
 }

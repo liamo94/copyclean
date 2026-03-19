@@ -15,6 +15,7 @@ enum AppTheme {
 
 class LineNumberRulerView: NSRulerView {
     var fontSize: CGFloat = NSFont.systemFontSize
+    var activeLine: Int = 0
 
     override var isFlipped: Bool { true }
     override var requiredThickness: CGFloat { 44 }
@@ -35,22 +36,29 @@ class LineNumberRulerView: NSRulerView {
         border.lineWidth = 1
         border.stroke()
 
-        let attrs: [NSAttributedString.Key: Any] = [
+        let inactiveAttrs: [NSAttributedString.Key: Any] = [
             .font: NSFont.monospacedSystemFont(ofSize: fontSize * 0.85, weight: .regular),
             .foregroundColor: isDark
                 ? AppTheme.teal.withAlphaComponent(0.55)
                 : AppTheme.teal.withAlphaComponent(0.65)
         ]
+        let activeAttrs: [NSAttributedString.Key: Any] = [
+            .font: NSFont.monospacedSystemFont(ofSize: fontSize * 0.85, weight: .semibold),
+            .foregroundColor: isDark
+                ? AppTheme.teal.withAlphaComponent(1.0)
+                : AppTheme.teal
+        ]
 
         layoutManager.ensureLayout(for: container)
 
-        let text = textView.string as NSString
-        let len  = text.length
+        let text  = textView.string as NSString
+        let len   = text.length
         let inset = textView.textContainerInset.height
         let width = requiredThickness
 
         func drawNum(_ n: Int, _ containerY: CGFloat) {
-            let s = "\(n)" as NSString
+            let attrs = n == activeLine ? activeAttrs : inactiveAttrs
+            let s  = "\(n)" as NSString
             let sz = s.size(withAttributes: attrs)
             s.draw(at: NSPoint(x: width - sz.width - 10, y: containerY + inset), withAttributes: attrs)
         }
@@ -93,12 +101,11 @@ struct EditorView: View {
     @State private var replaceText = ""
     @State private var matchCount = 0
     @FocusState private var isFindFieldFocused: Bool
-    @State private var currentLanguage = "plaintext"
     @State private var showShortcuts = false
     @State private var hoverTransform = false
     @State private var hoverCancel = false
-    @State private var hoverSave = false
     @State private var hoverKeyboard = false
+    @State private var hoverSave = false
     @State private var hoverWordWrap = false
 
     // Feature 1 – Cursor position
@@ -130,6 +137,7 @@ struct EditorView: View {
         ("JSON", "json"),
         ("Kotlin", "kotlin"),
         ("Markdown", "markdown"),
+        ("Perl", "perl"),
         ("PHP", "php"),
         ("Python", "python"),
         ("Ruby", "ruby"),
@@ -156,7 +164,7 @@ struct EditorView: View {
 
             CustomTextEditor(
                 text: $viewModel.text,
-                language: $currentLanguage,
+                language: $viewModel.currentLanguage,
                 fontSize: settings.fontSize,
                 wordWrap: wordWrap,
                 onTextViewReady: { tv in
@@ -173,7 +181,7 @@ struct EditorView: View {
 
             bottomBar
         }
-        .frame(minWidth: 520, minHeight: 380)
+        .frame(minWidth: 400, minHeight: 320)
         .background {
             Button("") {
                 showFindBar.toggle()
@@ -392,52 +400,80 @@ struct EditorView: View {
         .background(Color(nsColor: .controlBackgroundColor))
     }
 
+    // MARK: - Language Picker
+
+    private var currentLanguageLabel: String {
+        Self.languages.first { $0.id == viewModel.currentLanguage }?.label ?? viewModel.currentLanguage
+    }
+
+    @ViewBuilder private var languagePickerItems: some View {
+        ForEach(Self.languages, id: \.id) { lang in
+            Button {
+                if lang.id == "auto" {
+                    viewModel.currentLanguage = CustomTextEditor.Coordinator.guessLanguage(viewModel.text)
+                    viewModel.languageIsManual = false
+                } else {
+                    viewModel.currentLanguage = lang.id
+                    viewModel.languageIsManual = true
+                }
+            } label: {
+                HStack {
+                    Text(lang.label)
+                    if viewModel.currentLanguage == lang.id {
+                        Spacer()
+                        Image(systemName: "checkmark")
+                    }
+                }
+            }
+        }
+    }
+
     // MARK: - Bottom Bar
 
     private var bottomBar: some View {
+        ViewThatFits(in: .horizontal) {
+            bottomBarHStack(showStats: true,  showKeyboard: true)
+            bottomBarHStack(showStats: false, showKeyboard: true)
+            bottomBarHStack(showStats: false, showKeyboard: false)
+        }
+        .frame(height: 36)
+        .background(Color(nsColor: .windowBackgroundColor))
+    }
+
+    @ViewBuilder
+    private func bottomBarHStack(showStats: Bool, showKeyboard: Bool) -> some View {
         HStack(spacing: 0) {
-            // Feature 1 – cursor position
+            // Cursor position
             Text("\(cursorLine):\(cursorColumn)")
                 .font(.system(size: 12).monospacedDigit())
                 .foregroundColor(AppTheme.tealSUI)
-                .frame(width: 36, alignment: .leading)
-                .padding(.horizontal, 14)
+                .fixedSize()
+                .padding(.horizontal, 10)
 
             barDivider
 
-            // Stats
-            let stats = textStats
-            HStack(spacing: 10) {
-                statPill(value: "\(stats.lines)", label: "ln",  valueWidth: 18)
-                statPill(value: "\(stats.words)", label: "wd",  valueWidth: 24)
-                statPill(value: "\(stats.chars)", label: "ch",  valueWidth: 34)
+            if showStats {
+                HStack(spacing: 10) {
+                    statPill(value: "\(textStats.lines)", label: "ln", valueWidth: 18)
+                    statPill(value: "\(textStats.words)", label: "wd", valueWidth: 24)
+                    statPill(value: "\(textStats.chars)", label: "ch", valueWidth: 34)
+                }
+                .fixedSize()
+                .padding(.horizontal, 10)
+                barDivider
             }
-            .fixedSize()
-            .padding(.horizontal, 10)
-
-            barDivider
 
             // Transform menu
             Menu {
-                Menu("Language: \(Self.languages.first { $0.id == currentLanguage }?.label ?? currentLanguage)") {
-                    ForEach(Self.languages, id: \.id) { lang in
-                        Button {
-                            if lang.id == "auto" {
-                                currentLanguage = CustomTextEditor.Coordinator.guessLanguage(viewModel.text)
-                            } else {
-                                currentLanguage = lang.id
-                            }
-                        } label: {
-                            HStack {
-                                Text(lang.label)
-                                if currentLanguage == lang.id {
-                                    Spacer()
-                                    Image(systemName: "checkmark")
-                                }
-                            }
-                        }
-                    }
+                Menu("Language: \(currentLanguageLabel)") {
+                    languagePickerItems
                 }
+
+                Divider()
+
+                Button("Format Code") { formatCode() }
+                    .keyboardShortcut("f", modifiers: [.command, .shift])
+                    .disabled(!["json", "xml"].contains(viewModel.currentLanguage))
 
                 Divider()
 
@@ -449,7 +485,7 @@ struct EditorView: View {
 
                     Button("Normalize Indentation") {
                         transform { text in
-                            let tabWidth = 4
+                            let tabWidth = SettingsManager.shared.tabSize
                             let lines = text.components(separatedBy: "\n")
                             let expandedLines = lines.map { line -> String in
                                 line.replacingOccurrences(of: "\t", with: String(repeating: " ", count: tabWidth))
@@ -480,10 +516,16 @@ struct EditorView: View {
                         }
                     }
                     Button("Tabs → Spaces") {
-                        transform { $0.replacingOccurrences(of: "\t", with: "    ") }
+                        transform {
+                            let spaces = String(repeating: " ", count: SettingsManager.shared.tabSize)
+                            return $0.replacingOccurrences(of: "\t", with: spaces)
+                        }
                     }
                     Button("Spaces → Tabs") {
-                        transform { $0.replacingOccurrences(of: "    ", with: "\t") }
+                        transform {
+                            let spaces = String(repeating: " ", count: SettingsManager.shared.tabSize)
+                            return $0.replacingOccurrences(of: spaces, with: "\t")
+                        }
                     }
                 }
 
@@ -549,7 +591,7 @@ struct EditorView: View {
 
             barDivider
 
-            Spacer()
+            Spacer(minLength: 0)
 
             // Feature 8 – Word wrap toggle
             Button {
@@ -622,29 +664,28 @@ struct EditorView: View {
             .padding(.horizontal, 8)
             .onHover { hoverSave = $0 }
 
-            barDivider
+            if showKeyboard {
+                barDivider
 
-            // Shortcuts popover
-            Button {
-                showShortcuts.toggle()
-            } label: {
-                Image(systemName: "keyboard")
-                    .foregroundColor(showShortcuts || hoverKeyboard ? AppTheme.tealSUI : .secondary)
-                    .font(.system(size: 12))
-                    .padding(.horizontal, 6)
-                    .padding(.vertical, 3)
-                    .background(hoverKeyboard ? Color.secondary.opacity(0.12) : Color.clear)
-                    .cornerRadius(5)
+                Button {
+                    showShortcuts.toggle()
+                } label: {
+                    Image(systemName: "keyboard")
+                        .foregroundColor(showShortcuts || hoverKeyboard ? AppTheme.tealSUI : .secondary)
+                        .font(.system(size: 12))
+                        .padding(.horizontal, 6)
+                        .padding(.vertical, 3)
+                        .background(hoverKeyboard ? Color.secondary.opacity(0.12) : Color.clear)
+                        .cornerRadius(5)
+                }
+                .buttonStyle(.plain)
+                .popover(isPresented: $showShortcuts, arrowEdge: .top) {
+                    ShortcutsPopover()
+                }
+                .padding(.horizontal, 8)
+                .onHover { hoverKeyboard = $0 }
             }
-            .buttonStyle(.plain)
-            .popover(isPresented: $showShortcuts, arrowEdge: .top) {
-                ShortcutsPopover()
-            }
-            .padding(.horizontal, 8)
-            .onHover { hoverKeyboard = $0 }
         }
-        .frame(height: 36)
-        .background(Color(nsColor: .windowBackgroundColor))
     }
 
     private var barDivider: some View {
@@ -920,6 +961,38 @@ struct EditorView: View {
         }
     }
 
+    // MARK: - Format Code
+
+    private func formatCode() {
+        let lang = viewModel.currentLanguage
+        let text = viewModel.text
+        var result: String?
+
+        switch lang {
+        case "json":
+            if let data = text.data(using: .utf8),
+               let obj  = try? JSONSerialization.jsonObject(with: data),
+               let out  = try? JSONSerialization.data(withJSONObject: obj, options: [.prettyPrinted, .withoutEscapingSlashes]),
+               let str  = String(data: out, encoding: .utf8) {
+                result = str
+            }
+        case "xml":
+            if let data = text.data(using: .utf8),
+               let doc  = try? XMLDocument(data: data, options: .nodePrettyPrint) {
+                result = String(data: doc.xmlData(options: .nodePrettyPrint), encoding: .utf8)
+            }
+        default:
+            break
+        }
+
+        if let formatted = result, !formatted.isEmpty {
+            transform { _ in formatted }
+            AppDelegate.shared?.showToast("Formatted")
+        } else if result == nil && ["json", "xml"].contains(lang) {
+            AppDelegate.shared?.showToast("Format failed — check syntax")
+        }
+    }
+
     private func transform(_ operation: (String) -> String) {
         guard let textView = textView else {
             viewModel.text = operation(viewModel.text)
@@ -953,6 +1026,111 @@ struct EditorView: View {
             }
         }
         apply(tv: textView, to: newText, undoing: oldText, restoring: restoredRange)
+    }
+}
+
+/// MARK: - NSTextView subclass with VS Code word movement
+
+final class MangleTextView: NSTextView {
+
+    // MARK: Key interception (most reliable — fires before interpretKeyEvents)
+
+    override func keyDown(with event: NSEvent) {
+        let opt   = event.modifierFlags.contains(.option)
+        let shift = event.modifierFlags.contains(.shift)
+        let cmd   = event.modifierFlags.contains(.command)
+        let ctrl  = event.modifierFlags.contains(.control)
+
+        // Only handle plain Option+Arrow / Option+Shift+Arrow / Option+Delete
+        if opt && !cmd && !ctrl {
+            switch event.keyCode {
+            case 124: // Right arrow
+                shift ? moveWordForwardAndModifySelection(nil) : moveWordForward(nil)
+                return
+            case 123: // Left arrow
+                shift ? moveWordBackwardAndModifySelection(nil) : moveWordBackward(nil)
+                return
+            case 51: // Delete (backspace)
+                if !shift { deleteWordBackward(nil); return }
+            default:
+                break
+            }
+        }
+        super.keyDown(with: event)
+    }
+
+    // MARK: Overrides
+
+    override func moveWordForward(_ sender: Any?) {
+        let sel = selectedRange()
+        setSelectedRange(NSRange(location: vscodeWordEnd(from: sel.location + sel.length), length: 0))
+    }
+
+    override func moveWordBackward(_ sender: Any?) {
+        let sel = selectedRange()
+        setSelectedRange(NSRange(location: vscodeWordStart(from: sel.location), length: 0))
+    }
+
+    override func moveWordForwardAndModifySelection(_ sender: Any?) {
+        let sel = selectedRange()
+        let dest = vscodeWordEnd(from: sel.location + sel.length)
+        setSelectedRange(NSRange(location: sel.location, length: dest - sel.location))
+    }
+
+    override func moveWordBackwardAndModifySelection(_ sender: Any?) {
+        let sel = selectedRange()
+        let dest = vscodeWordStart(from: sel.location)
+        setSelectedRange(NSRange(location: dest, length: (sel.location + sel.length) - dest))
+    }
+
+    override func deleteWordBackward(_ sender: Any?) {
+        let sel = selectedRange()
+        guard sel.length == 0 else { super.deleteWordBackward(sender); return }
+        let dest = vscodeWordStart(from: sel.location)
+        let range = NSRange(location: dest, length: sel.location - dest)
+        guard range.length > 0, shouldChangeText(in: range, replacementString: "") else { return }
+        replaceCharacters(in: range, with: "")
+        didChangeText()
+    }
+
+    // MARK: VS Code word algorithm (NSString / unichar based)
+
+    private func wcIsWord(_ c: unichar) -> Bool {
+        (c >= 65 && c <= 90)  ||  // A-Z
+        (c >= 97 && c <= 122) ||  // a-z
+        (c >= 48 && c <= 57)  ||  // 0-9
+        c == 95                    // _
+    }
+
+    private func wcIsSpace(_ c: unichar) -> Bool {
+        c == 32 || c == 9 || c == 10 || c == 13
+    }
+
+    private func vscodeWordEnd(from pos: Int) -> Int {
+        let s = string as NSString
+        let n = s.length
+        var i = pos
+        while i < n && wcIsSpace(s.character(at: i)) { i += 1 }
+        guard i < n else { return n }
+        if wcIsWord(s.character(at: i)) {
+            while i < n && wcIsWord(s.character(at: i)) { i += 1 }
+        } else {
+            while i < n && !wcIsWord(s.character(at: i)) && !wcIsSpace(s.character(at: i)) { i += 1 }
+        }
+        return i
+    }
+
+    private func vscodeWordStart(from pos: Int) -> Int {
+        let s = string as NSString
+        var i = pos
+        while i > 0 && wcIsSpace(s.character(at: i - 1)) { i -= 1 }
+        guard i > 0 else { return 0 }
+        if wcIsWord(s.character(at: i - 1)) {
+            while i > 0 && wcIsWord(s.character(at: i - 1)) { i -= 1 }
+        } else {
+            while i > 0 && !wcIsWord(s.character(at: i - 1)) && !wcIsSpace(s.character(at: i - 1)) { i -= 1 }
+        }
+        return i
     }
 }
 
@@ -991,7 +1169,7 @@ struct CustomTextEditor: NSViewRepresentable {
         textContainer.widthTracksTextView = true
         layoutManager.addTextContainer(textContainer)
 
-        let textView = NSTextView(frame: .zero, textContainer: textContainer)
+        let textView = MangleTextView(frame: .zero, textContainer: textContainer)
         textView.isEditable = true
         textView.isSelectable = true
         textView.allowsUndo = true
@@ -1015,6 +1193,9 @@ struct CustomTextEditor: NSViewRepresentable {
         scrollView.hasVerticalScroller = true
         scrollView.hasHorizontalScroller = false
         scrollView.autohidesScrollers = true
+        // Layer-backed so AppKit clips the ruler to the scroll view's own bounds,
+        // preventing it from rendering over the SwiftUI bottom bar.
+        scrollView.wantsLayer = true
 
         let rulerView = LineNumberRulerView(scrollView: scrollView, orientation: .verticalRuler)
         rulerView.clientView = textView
@@ -1134,6 +1315,8 @@ struct CustomTextEditor: NSViewRepresentable {
         var lastAppliedTheme: String?
         // Feature 8
         var currentWordWrap: Bool = true
+        // Bracket highlighting
+        var bracketHighlightRanges: [NSRange] = []
 
         init(_ parent: CustomTextEditor) { self.parent = parent }
 
@@ -1155,52 +1338,108 @@ struct CustomTextEditor: NSViewRepresentable {
         static func guessLanguage(_ text: String) -> String {
             let t = text.trimmingCharacters(in: .whitespacesAndNewlines)
             guard !t.isEmpty else { return "plaintext" }
+            let lines = t.components(separatedBy: "\n")
+            let firstLine = lines.first ?? ""
 
-            // Shell
-            if t.hasPrefix("#!/bin/bash") || t.hasPrefix("#!/bin/sh") || t.hasPrefix("#!/usr/bin/env bash") {
+            // Shebang — unambiguous interpreter hint
+            if firstLine.hasPrefix("#!") {
+                if firstLine.contains("python")                          { return "python" }
+                if firstLine.contains("ruby")                            { return "ruby" }
+                if firstLine.contains("node") || firstLine.contains("deno") { return "javascript" }
                 return "bash"
             }
-            // HTML
-            if t.lowercased().hasPrefix("<!doctype html") || t.hasPrefix("<html") {
-                return "xml"
-            }
-            // XML
-            if t.hasPrefix("<?xml") || (t.hasPrefix("<") && t.contains("</")) {
-                return "xml"
-            }
-            // JSON
-            if (t.hasPrefix("{") || t.hasPrefix("[")) && (t.contains("\"") || t.contains(":")) {
+
+            // Unambiguous prefix markers
+            let lower = t.lowercased()
+            if t.hasPrefix("<?php")                                             { return "php" }
+            if lower.hasPrefix("<!doctype html") || lower.hasPrefix("<html")   { return "xml" }
+            if t.hasPrefix("<?xml") || (t.hasPrefix("<") && t.contains("</")) { return "xml" }
+
+            // JSON — leading brace/bracket with quoted content
+            if (t.hasPrefix("{") || t.hasPrefix("[")) && t.contains("\"") {
                 return "json"
             }
-            // SQL
+
+            // SQL — leading keyword
             let up = t.uppercased()
-            if up.hasPrefix("SELECT ") || up.hasPrefix("INSERT ") || up.hasPrefix("UPDATE ") || up.hasPrefix("DELETE ") || up.hasPrefix("CREATE TABLE") {
-                return "sql"
+            let sqlPrefixes = ["SELECT ", "INSERT INTO", "UPDATE ", "DELETE FROM",
+                               "CREATE TABLE", "DROP TABLE", "ALTER TABLE", "WITH "]
+            if sqlPrefixes.contains(where: { up.hasPrefix($0) }) { return "sql" }
+
+            // C / C++ — #include is a dead giveaway; C++ tokens distinguish them
+            if t.contains("#include") {
+                return score(t, ["std::", "cout", "cin", "vector<", "nullptr", "template<", "::"]) >= 1
+                    ? "cpp" : "c"
             }
-            // Swift
-            if score(t, ["import Foundation", "import SwiftUI", "import AppKit", "func ", "var ", "let ", "struct ", "class ", "protocol ", "enum ", " -> "]) >= 3 {
-                return "swift"
-            }
-            // Python
-            if score(t, ["def ", "import ", "print(", "elif ", "self.", "class ", "if __name__"]) >= 2 {
-                return "python"
-            }
-            // TypeScript
-            if score(t, ["interface ", ": string", ": number", ": boolean", " as ", "export ", "import "]) >= 2 {
-                return "typescript"
-            }
+
+            // Swift — specific framework imports are unambiguous
+            if score(t, ["import SwiftUI", "import Foundation", "import AppKit",
+                         "import UIKit", "import Combine"]) >= 1 { return "swift" }
+            if score(t, ["@State", "@Binding", "@Published", "@ObservedObject",
+                         "@StateObject", "some View", "var body"]) >= 1 { return "swift" }
+            if score(t, ["func ", "guard ", " -> ", "struct ", "enum ", "protocol ", "extension ", "var ", "let "]) >= 3 { return "swift" }
+            // Swift range operators are highly distinctive
+            if (t.contains("...") || t.contains("..<")) &&
+               score(t, ["func ", "var ", "let ", " -> ", "for "]) >= 2 { return "swift" }
+
+            // Rust
+            if score(t, ["fn ", "let mut ", "impl ", "pub struct", "pub fn",
+                         "use std::", "Some(", "Ok(", "Err("]) >= 2 { return "rust" }
+
+            // Go — `package` declaration anchors detection
+            if t.contains("package ") &&
+               score(t, ["func ", ":=", "fmt.", "var ", "type ", "interface{}", "map["]) >= 1 { return "go" }
+            // Go — snippets without package: `func` + any Go-specific hint
+            if t.contains("func ") &&
+               score(t, [":=", "fmt.", "rand.", "defer ", "go func", "make(", "chan ", "goroutine"]) >= 1 { return "go" }
+            if score(t, [":=", "fmt.", "rand.", "goroutine", "defer ", "go func"]) >= 2 { return "go" }
+
+            // Kotlin — keywords not shared with Java
+            if score(t, ["fun ", "val ", "data class", "companion object",
+                         "suspend fun", "?.let", "?: "]) >= 2 { return "kotlin" }
+
+            // Java
+            if score(t, ["public class", "public static void main", "System.out.println",
+                         "import java.", "@Override", "extends ", "implements "]) >= 2 { return "java" }
+
+            // Python — colon-block style without braces separates it from JS/TS
+            if score(t, ["def ", "elif ", "self.", "if __name__",
+                         "print(", "lambda ", "import numpy", "import pandas"]) >= 2 { return "python" }
+            if t.contains("def ") && t.contains(":") && !t.contains("{") { return "python" }
+
+            // Perl — sub + Perl-specific sigils/builtins
+            if t.contains("sub ") &&
+               score(t, ["@_", "scalar(", "$_[", "my $", "use strict", "use warnings", "->{"]) >= 1 { return "perl" }
+            if score(t, ["@_", "scalar(@", "my $", "use strict", "use warnings"]) >= 2 { return "perl" }
+
+            // Ruby — `def`+`end` without braces is unambiguous (Python uses `:`, JS/Swift use `{}`)
+            if t.contains("def ") && t.contains("end") && !t.contains("{") { return "ruby" }
+            if score(t, ["def ", " do\n", " do |", "puts ", "require ",
+                         "attr_accessor", ".each", "class << self", " end\n"]) >= 2 { return "ruby" }
+
+            // TypeScript — type annotations checked before generic JS
+            if score(t, ["interface ", ": string", ": number", ": boolean",
+                         "export type ", "export interface", "readonly ", "<T>", " as "]) >= 2 { return "typescript" }
+
             // JavaScript
-            if score(t, ["const ", "function ", "=>", "require(", "module.exports", "console.log", "async ", "await ", "typeof ", "instanceof ", "var ", "return "]) >= 2 {
-                return "javascript"
+            if score(t, ["const ", "function ", "=>", "require(", "module.exports",
+                         "console.log", "async ", "typeof "]) >= 2 { return "javascript" }
+
+            // YAML — lines matching `key: value` pattern
+            let yamlLines = lines.filter { line in
+                let s = line.trimmingCharacters(in: .whitespaces)
+                return !s.isEmpty && !s.hasPrefix("#") &&
+                       s.range(of: #"^[\w.-]+:\s"#, options: .regularExpression) != nil
             }
-            // CSS
-            if score(t, ["{", ":", ";", "px", "rem", "color", "margin", "padding"]) >= 4 && !t.hasPrefix("{") {
-                return "css"
-            }
+            if yamlLines.count >= 2 { return "yaml" }
+
+            // CSS — specific property names, not generic punctuation
+            if score(t, ["color:", "background:", "margin:", "padding:",
+                         "display:", "font-size:", "border:", "flex:", "position:"]) >= 2 { return "css" }
+
             // Markdown
-            if score(t, ["## ", "# ", "**", "- [", "```", "[](", "---"]) >= 2 {
-                return "markdown"
-            }
+            if score(t, ["## ", "# ", "**", "```", "---", "> "]) >= 2 { return "markdown" }
+
             return "plaintext"
         }
 
@@ -1232,7 +1471,93 @@ struct CustomTextEditor: NSViewRepresentable {
                                 for: NSRange(location: safeLen, length: 0))
             let col = loc - lineStart + 1
 
+            rulerView?.activeLine = lineNum
+            rulerView?.needsDisplay = true
             parent.onCursorChange?(lineNum, col)
+
+            highlightMatchingBracket(in: textView)
+        }
+
+        // MARK: - Bracket Highlighting
+
+        private static let bracketPairs: [Character: Character] = [
+            "(": ")", "{": "}", "[": "]",
+            ")": "(", "}": "{", "]": "["
+        ]
+        private static let openBrackets: Set<Character> = ["(", "{", "["]
+        private static let closeBrackets: Set<Character> = [")", "}", "]"]
+
+        private func highlightMatchingBracket(in textView: NSTextView) {
+            guard let storage = textView.textStorage else { return }
+
+            // Clear previous bracket highlights
+            for range in bracketHighlightRanges {
+                if range.location + range.length <= storage.length {
+                    storage.removeAttribute(.backgroundColor, range: range)
+                }
+            }
+            bracketHighlightRanges = []
+
+            let str = textView.string
+            let loc = textView.selectedRange().location
+            guard textView.selectedRange().length == 0 else { return }
+
+            // Try char before cursor first, then char after cursor
+            let candidates: [Int] = [loc - 1, loc].filter { $0 >= 0 && $0 < str.count }
+            var foundAnchor: Int? = nil
+            var foundChar: Character? = nil
+            for pos in candidates {
+                let idx = str.index(str.startIndex, offsetBy: pos)
+                let ch = str[idx]
+                if Self.bracketPairs[ch] != nil {
+                    foundAnchor = pos
+                    foundChar = ch
+                    break
+                }
+            }
+
+            guard let anchor = foundAnchor, let bracketChar = foundChar,
+                  let matchChar = Self.bracketPairs[bracketChar] else { return }
+
+            let isOpen = Self.openBrackets.contains(bracketChar)
+            let chars = Array(str.unicodeScalars)
+            var depth = 0
+            var matchPos: Int? = nil
+
+            if isOpen {
+                for i in anchor..<chars.count {
+                    let ch = Character(chars[i])
+                    if ch == bracketChar { depth += 1 }
+                    else if ch == matchChar {
+                        depth -= 1
+                        if depth == 0 { matchPos = i; break }
+                    }
+                }
+            } else {
+                for i in stride(from: anchor, through: 0, by: -1) {
+                    let ch = Character(chars[i])
+                    if ch == bracketChar { depth += 1 }
+                    else if ch == matchChar {
+                        depth -= 1
+                        if depth == 0 { matchPos = i; break }
+                    }
+                }
+            }
+
+            let isDark = NSApp.effectiveAppearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
+            let highlightColor = isDark
+                ? NSColor(red: 0.3, green: 0.6, blue: 0.6, alpha: 0.45)
+                : NSColor(red: 0.2, green: 0.7, blue: 0.7, alpha: 0.3)
+
+            let anchorRange = NSRange(location: anchor, length: 1)
+            storage.addAttribute(.backgroundColor, value: highlightColor, range: anchorRange)
+            bracketHighlightRanges.append(anchorRange)
+
+            if let mp = matchPos {
+                let matchRange = NSRange(location: mp, length: 1)
+                storage.addAttribute(.backgroundColor, value: highlightColor, range: matchRange)
+                bracketHighlightRanges.append(matchRange)
+            }
         }
 
         func textView(_ textView: NSTextView, doCommandBy commandSelector: Selector) -> Bool {
@@ -1261,6 +1586,8 @@ struct CustomTextEditor: NSViewRepresentable {
         }
 
         private func handleTab(textView: NSTextView, reverse: Bool) {
+            let tabSize = SettingsManager.shared.tabSize
+            let spaces = String(repeating: " ", count: tabSize)
             let selectedRange = textView.selectedRange()
             let text = textView.string as NSString
 
@@ -1284,7 +1611,7 @@ struct CustomTextEditor: NSViewRepresentable {
                             return line.prefix(while: { $0 == " " }).count
                         }
                         .filter { $0 > 0 }
-                    let toRemove = min(indents.min() ?? 0, 4)
+                    let toRemove = min(indents.min() ?? 0, tabSize)
                     for line in lines {
                         if line.hasPrefix("\t") {
                             modifiedLines.append(String(line.dropFirst()))
@@ -1293,7 +1620,7 @@ struct CustomTextEditor: NSViewRepresentable {
                         }
                     }
                 } else {
-                    for line in lines { modifiedLines.append("    " + line) }
+                    for line in lines { modifiedLines.append(spaces + line) }
                 }
 
                 let newText = modifiedLines.joined(separator: "\n")
@@ -1311,8 +1638,8 @@ struct CustomTextEditor: NSViewRepresentable {
                 if reverse {
                     let lineText = text.substring(with: NSRange(location: lineStart, length: contentsEnd - lineStart))
                     let beforeCursor = lineText.prefix(selectedRange.location - lineStart)
-                    if beforeCursor.hasSuffix("    ") {
-                        let removeRange = NSRange(location: selectedRange.location - 4, length: 4)
+                    if beforeCursor.hasSuffix(spaces) {
+                        let removeRange = NSRange(location: selectedRange.location - tabSize, length: tabSize)
                         if textView.shouldChangeText(in: removeRange, replacementString: "") {
                             textView.replaceCharacters(in: removeRange, with: "")
                             textView.didChangeText()
@@ -1325,8 +1652,8 @@ struct CustomTextEditor: NSViewRepresentable {
                         }
                     }
                 } else {
-                    if textView.shouldChangeText(in: selectedRange, replacementString: "    ") {
-                        textView.replaceCharacters(in: selectedRange, with: "    ")
+                    if textView.shouldChangeText(in: selectedRange, replacementString: spaces) {
+                        textView.replaceCharacters(in: selectedRange, with: spaces)
                         textView.didChangeText()
                     }
                 }
@@ -1360,6 +1687,7 @@ private struct ShortcutsPopover: View {
             ("⌘ 0",        "Reset font size"),
         ]),
         ("Transform", [
+            ("⌘ ⇧ F",      "Format code"),
             ("⌘ ⇧ T",      "Trim whitespace"),
             ("⌘ ⇧ L",      "Lowercase"),
             ("⌘ ⇧ U",      "Uppercase"),
@@ -1371,34 +1699,36 @@ private struct ShortcutsPopover: View {
     ]
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 16) {
-            ForEach(sections, id: \.title) { section in
-                VStack(alignment: .leading, spacing: 6) {
-                    Text(section.title)
-                        .font(.caption)
-                        .fontWeight(.semibold)
-                        .foregroundColor(AppTheme.tealSUI)
-                        .textCase(.uppercase)
+        ScrollView(.vertical, showsIndicators: false) {
+            VStack(alignment: .leading, spacing: 16) {
+                ForEach(sections, id: \.title) { section in
+                    VStack(alignment: .leading, spacing: 6) {
+                        Text(section.title)
+                            .font(.caption)
+                            .fontWeight(.semibold)
+                            .foregroundColor(AppTheme.tealSUI)
+                            .textCase(.uppercase)
 
-                    ForEach(section.shortcuts, id: \.action) { shortcut in
-                        HStack(spacing: 0) {
-                            Text(shortcut.action)
-                                .font(.callout)
-                                .foregroundColor(.primary)
-                            Spacer()
-                            Text(shortcut.keys)
-                                .font(.callout.monospaced())
-                                .foregroundColor(.secondary)
-                                .padding(.horizontal, 7)
-                                .padding(.vertical, 2)
-                                .background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 5))
+                        ForEach(section.shortcuts, id: \.action) { shortcut in
+                            HStack(spacing: 0) {
+                                Text(shortcut.action)
+                                    .font(.callout)
+                                    .foregroundColor(.primary)
+                                Spacer()
+                                Text(shortcut.keys)
+                                    .font(.callout.monospaced())
+                                    .foregroundColor(.secondary)
+                                    .padding(.horizontal, 7)
+                                    .padding(.vertical, 2)
+                                    .background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 5))
+                            }
                         }
                     }
                 }
             }
+            .padding(16)
         }
-        .padding(16)
-        .frame(width: 280)
+        .frame(width: 280, height: 520)
     }
 }
 
