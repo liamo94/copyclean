@@ -85,9 +85,9 @@ class SettingsManager: ObservableObject {
             UserDefaults.standard.set(tabSize, forKey: tabSizeKey)
         }
     }
-
+    
     var onShortcutsChanged: (() -> Void)?
-
+    
     private let editorKey = "EditorShortcut"
     private let historyKey = "HistoryShortcut"
     private let pauseHistoryKey = "PauseHistory"
@@ -116,13 +116,13 @@ class SettingsManager: ObservableObject {
         }
         
         pauseHistory = UserDefaults.standard.bool(forKey: pauseHistoryKey)
-
+        
         let storedFontSize = UserDefaults.standard.double(forKey: fontSizeKey)
         fontSize = storedFontSize > 0 ? CGFloat(storedFontSize) : NSFont.systemFontSize
-
+        
         let storedMax = UserDefaults.standard.integer(forKey: "MaxHistory")
         maxHistory = storedMax > 0 ? storedMax : 100
-
+        
         let storedTabSize = UserDefaults.standard.integer(forKey: "TabSize")
         tabSize = storedTabSize > 0 ? storedTabSize : 4
     }
@@ -217,12 +217,12 @@ class ShortcutCaptureNSView: NSView {
 
 struct SettingsView: View {
     @ObservedObject var settings = SettingsManager.shared
-
+    
     @State private var editorShortcut: KeyboardShortcut
     @State private var historyShortcut: KeyboardShortcut
     @State private var showClearConfirm = false
     @State private var maxHistory: Int
-
+    
     init() {
         _editorShortcut = State(initialValue: SettingsManager.shared.editorShortcut)
         _historyShortcut = State(initialValue: SettingsManager.shared.historyShortcut)
@@ -261,7 +261,7 @@ struct SettingsView: View {
                                     try SMAppService.mainApp.unregister()
                                 }
                             } catch {
-                                print("Failed to update login item: \(error)")
+                                // login item update failed — silently ignore
                             }
                         }
                     ))
@@ -276,19 +276,19 @@ struct SettingsView: View {
                     Toggle("", isOn: $settings.pauseHistory)
                         .labelsHidden()
                 }
-
+                
                 Divider()
-
+                
                 HStack {
                     Text("History Limit")
                     Spacer()
                     Stepper("\(maxHistory) entries", value: $maxHistory, in: 10...500, step: 10)
                 }
-
+                
                 Divider()
-
+                
                 Divider()
-
+                
                 HStack {
                     Text("Tab Size")
                     Spacer()
@@ -300,9 +300,9 @@ struct SettingsView: View {
                     .labelsHidden()
                     .frame(width: 140)
                 }
-
+                
                 Divider()
-
+                
                 HStack {
                     Text("Clear History")
                     Spacer()

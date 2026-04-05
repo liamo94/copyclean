@@ -7,7 +7,7 @@ struct HistoryEntry: Identifiable, Codable, Hashable {
     let timestamp: Date
     var isPinned: Bool
     var language: String? // nil = auto-detect; set when user manually picks a language
-
+    
     init(id: UUID = UUID(), text: String, timestamp: Date = Date(), isPinned: Bool = false, language: String? = nil) {
         self.id = id
         self.text = text
@@ -15,7 +15,7 @@ struct HistoryEntry: Identifiable, Codable, Hashable {
         self.isPinned = isPinned
         self.language = language
     }
-
+    
     // Custom decoder for backwards compatibility – isPinned/language may be absent in old data
     init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
@@ -25,12 +25,12 @@ struct HistoryEntry: Identifiable, Codable, Hashable {
         isPinned  = (try container.decodeIfPresent(Bool.self,   forKey: .isPinned)) ?? false
         language  =  try container.decodeIfPresent(String.self, forKey: .language)
     }
-
+    
     // Hashable conformance
     func hash(into hasher: inout Hasher) {
         hasher.combine(id)
     }
-
+    
     static func == (lhs: HistoryEntry, rhs: HistoryEntry) -> Bool {
         lhs.id == rhs.id
     }
@@ -39,19 +39,19 @@ struct HistoryEntry: Identifiable, Codable, Hashable {
 class HistoryManager: ObservableObject {
     @Published var entries: [HistoryEntry] = []
     private let saveKey = "MangleHistory"
-
+    
     init() {
         loadHistory()
     }
-
+    
     func addEntry(_ text: String) {
         guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
         // Deduplicate: skip if the most-recent entry has the same text
         if entries.first?.text == text { return }
-
+        
         let entry = HistoryEntry(text: text)
         entries.insert(entry, at: 0)
-
+        
         // Trim unpinned entries to the configured limit; pinned entries are kept regardless
         let max = SettingsManager.shared.maxHistory
         let pinned   = entries.filter {  $0.isPinned }
@@ -60,40 +60,40 @@ class HistoryManager: ObservableObject {
             unpinned = Array(unpinned.prefix(max))
         }
         entries = pinned + unpinned
-
+        
         saveHistory()
     }
-
+    
     func deleteEntry(_ entry: HistoryEntry) {
         entries.removeAll { $0.id == entry.id }
         saveHistory()
     }
-
+    
     func clearHistory() {
         entries.removeAll()
         saveHistory()
     }
-
+    
     func togglePin(_ entry: HistoryEntry) {
         if let idx = entries.firstIndex(where: { $0.id == entry.id }) {
             entries[idx].isPinned.toggle()
             saveHistory()
         }
     }
-
+    
     func updateLanguage(for id: UUID, language: String) {
         if let idx = entries.firstIndex(where: { $0.id == id }) {
             entries[idx].language = language
             saveHistory()
         }
     }
-
+    
     private func saveHistory() {
         if let encoded = try? JSONEncoder().encode(entries) {
             UserDefaults.standard.set(encoded, forKey: saveKey)
         }
     }
-
+    
     private func loadHistory() {
         if let data = UserDefaults.standard.data(forKey: saveKey),
            let decoded = try? JSONDecoder().decode([HistoryEntry].self, from: data) {
@@ -109,15 +109,15 @@ class EditorViewModel: ObservableObject {
     var baseText: String = ""
     var languageIsManual: Bool = false  // true when user explicitly picked a language
     var sourceEntryID: UUID? = nil      // set when editing an existing history entry
-
+    
     var isDirty: Bool { text != baseText }
-
+    
     /// Load new text and mark it as the saved baseline.
     func load(_ newText: String) {
         text = newText
         baseText = newText
     }
-
+    
     /// Mark the current text as saved.
     func markSaved() {
         baseText = text
