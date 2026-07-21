@@ -1,5 +1,6 @@
 import SwiftUI
 import AppKit
+import Combine
 import Highlightr
 
 // MARK: - Theme
@@ -125,8 +126,7 @@ struct EditorView: View {
     @State private var showCancelAlert = false
     
     
-    // Feature 8 – Word wrap toggle
-    @State private var wordWrap = true
+    @State private var needsAccessibility = !AXIsProcessTrusted()
     
     private static let languages: [(label: String, id: String)] = [
         ("Auto-detect", "auto"),
@@ -163,6 +163,9 @@ struct EditorView: View {
     
     var body: some View {
         VStack(spacing: 0) {
+            if needsAccessibility {
+                accessibilityBanner
+            }
             if showFindBar {
                 findBar
                 Divider()
@@ -172,7 +175,8 @@ struct EditorView: View {
                 text: $viewModel.text,
                 language: $viewModel.currentLanguage,
                 fontSize: settings.fontSize,
-                wordWrap: wordWrap,
+                wordWrap: settings.wordWrap,
+                manualLanguage: viewModel.languageIsManual,
                 onTextViewReady: { tv in
                     textView = tv
                 },
@@ -327,6 +331,48 @@ struct EditorView: View {
                     .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottom)
                 }
             }
+        }
+    }
+    
+    // MARK: - Accessibility Banner
+    
+    private var accessibilityBanner: some View {
+        VStack(spacing: 0) {
+            HStack(spacing: 8) {
+                Image(systemName: "exclamationmark.triangle.fill")
+                    .font(.system(size: 11))
+                    .foregroundColor(.yellow)
+                Text("Accessibility access needed to read selected text.")
+                    .font(.system(size: 11))
+                    .foregroundColor(.secondary)
+                Spacer()
+                Button("Enable in Settings") {
+                    if let window = NSApp.windows.first(where: { $0.title == "Mangle" }) {
+                        window.level = .normal
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 2) {
+                            if !AXIsProcessTrusted() { window.level = .floating }
+                        }
+                    }
+                    NSWorkspace.shared.open(URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility")!)
+                }
+                .font(.system(size: 11))
+                Button {
+                    needsAccessibility = !AXIsProcessTrusted()
+                } label: {
+                    Image(systemName: "checkmark.circle")
+                        .font(.system(size: 14))
+                }
+                .help("I've enabled it")
+                .buttonStyle(.plain)
+                .foregroundColor(.secondary)
+            }
+            .padding(.horizontal, 12)
+            .padding(.vertical, 6)
+            .background(Color.yellow.opacity(0.08))
+            .onReceive(Timer.publish(every: 1, on: .main, in: .common).autoconnect()) { _ in
+                if AXIsProcessTrusted() { needsAccessibility = false }
+            }
+            Divider()
         }
     }
     
@@ -485,7 +531,20 @@ struct EditorView: View {
                 
                 Section("Whitespace") {
                     Button("Trim Whitespace") {
-                        transform { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+                        transform { text in
+                            let lines = text.components(separatedBy: "\n")
+                            let minIndent = lines
+                                .filter { !$0.trimmingCharacters(in: .whitespaces).isEmpty }
+                                .map { $0.prefix(while: { $0 == " " || $0 == "\t" }).count }
+                                .min() ?? 0
+                            return lines
+                                .map { line in
+                                    let dedented = line.count >= minIndent ? String(line.dropFirst(minIndent)) : line
+                                    return dedented.replacingOccurrences(of: "\\s+$", with: "", options: .regularExpression)
+                                }
+                                .joined(separator: "\n")
+                                .trimmingCharacters(in: .newlines)
+                        }
                     }
                     .keyboardShortcut("t", modifiers: [.command, .shift])
                     
@@ -619,12 +678,12 @@ struct EditorView: View {
             
             Spacer(minLength: 0)
             
-            // Feature 8 – Word wrap toggle
+            // Word wrap toggle
             Button {
-                wordWrap.toggle()
+                settings.wordWrap.toggle()
             } label: {
                 Image(systemName: "arrow.down.and.line.horizontal.and.arrow.up")
-                    .foregroundColor(wordWrap ? AppTheme.tealSUI : .secondary)
+                    .foregroundColor(settings.wordWrap ? AppTheme.tealSUI : .secondary)
                     .font(.system(size: 12))
                     .padding(.horizontal, 6)
                     .padding(.vertical, 3)
@@ -636,7 +695,7 @@ struct EditorView: View {
             .onHover { hoverWordWrap = $0 }
             .overlay(alignment: .top) {
                 if hoverWordWrap {
-                    Text(wordWrap ? "Word Wrap: On" : "Word Wrap: Off")
+                    Text(settings.wordWrap ? "Word Wrap: On" : "Word Wrap: Off")
                         .font(.caption)
                         .foregroundColor(.primary)
                         .padding(.horizontal, 8)
@@ -1179,6 +1238,7 @@ struct CustomTextEditor: NSViewRepresentable {
     @Binding var language: String
     var fontSize: CGFloat
     var wordWrap: Bool
+    var manualLanguage: Bool
     var onTextViewReady: ((NSTextView) -> Void)?
     var onCursorChange: ((Int, Int) -> Void)?
     
@@ -1386,16 +1446,28 @@ struct CustomTextEditor: NSViewRepresentable {
         
         func detectAndApplyLanguage(for text: String) {
             guard let codeStorage, !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
+            guard !parent.manualLanguage else { return }
             DispatchQueue.global(qos: .userInitiated).async {
                 let detected = Self.guessLanguage(text)
                 DispatchQueue.main.async {
+                    guard !self.parent.manualLanguage else { return }
                     codeStorage.language = detected
                     self.parent.language = detected
                 }
             }
         }
         
+        private static var guessCache: [Int: String] = [:]
+
         static func guessLanguage(_ text: String) -> String {
+            let key = text.hashValue
+            if let hit = guessCache[key] { return hit }
+            let result = _guessRaw(text)
+            guessCache[key] = result
+            return result
+        }
+
+        private static func _guessRaw(_ text: String) -> String {
             let t = text.trimmingCharacters(in: .whitespacesAndNewlines)
             guard !t.isEmpty else { return "plaintext" }
             let lines = t.components(separatedBy: "\n")
@@ -1567,30 +1639,33 @@ struct CustomTextEditor: NSViewRepresentable {
             guard textView.selectedRange().length == 0 else { return }
             
             // Try char before cursor first, then char after cursor
-            let candidates: [Int] = [loc - 1, loc].filter { $0 >= 0 && $0 < str.count }
+            let nsStr = str as NSString
+            let nsLen = nsStr.length
+            let candidates: [Int] = [loc - 1, loc].filter { $0 >= 0 && $0 < nsLen }
             var foundAnchor: Int? = nil
             var foundChar: Character? = nil
             for pos in candidates {
-                let idx = str.index(str.startIndex, offsetBy: pos)
-                let ch = str[idx]
+                let uc = nsStr.character(at: pos)
+                guard let scalar = Unicode.Scalar(uc) else { continue }
+                let ch = Character(scalar)
                 if Self.bracketPairs[ch] != nil {
                     foundAnchor = pos
                     foundChar = ch
                     break
                 }
             }
-            
+
             guard let anchor = foundAnchor, let bracketChar = foundChar,
                   let matchChar = Self.bracketPairs[bracketChar] else { return }
-            
+
             let isOpen = Self.openBrackets.contains(bracketChar)
-            let chars = Array(str.unicodeScalars)
             var depth = 0
             var matchPos: Int? = nil
-            
+
             if isOpen {
-                for i in anchor..<chars.count {
-                    let ch = Character(chars[i])
+                for i in anchor..<nsLen {
+                    guard let scalar = Unicode.Scalar(nsStr.character(at: i)) else { continue }
+                    let ch = Character(scalar)
                     if ch == bracketChar { depth += 1 }
                     else if ch == matchChar {
                         depth -= 1
@@ -1599,7 +1674,8 @@ struct CustomTextEditor: NSViewRepresentable {
                 }
             } else {
                 for i in stride(from: anchor, through: 0, by: -1) {
-                    let ch = Character(chars[i])
+                    guard let scalar = Unicode.Scalar(nsStr.character(at: i)) else { continue }
+                    let ch = Character(scalar)
                     if ch == bracketChar { depth += 1 }
                     else if ch == matchChar {
                         depth -= 1

@@ -85,16 +85,22 @@ class SettingsManager: ObservableObject {
             UserDefaults.standard.set(tabSize, forKey: tabSizeKey)
         }
     }
-    
+    @Published var wordWrap: Bool {
+        didSet {
+            UserDefaults.standard.set(wordWrap, forKey: wordWrapKey)
+        }
+    }
+
     var onShortcutsChanged: (() -> Void)?
-    
+
     private let editorKey = "EditorShortcut"
     private let historyKey = "HistoryShortcut"
     private let pauseHistoryKey = "PauseHistory"
     private let fontSizeKey = "EditorFontSize"
     private let maxHistoryKey = "MaxHistory"
     private let tabSizeKey = "TabSize"
-    
+    private let wordWrapKey = "WordWrap"
+
     init() {
         // Default: Ctrl+Cmd+E for editor
         let defaultEditor = KeyboardShortcut(keyCode: 14, modifiers: UInt32(controlKey | cmdKey))
@@ -125,6 +131,8 @@ class SettingsManager: ObservableObject {
         
         let storedTabSize = UserDefaults.standard.integer(forKey: "TabSize")
         tabSize = storedTabSize > 0 ? storedTabSize : 4
+
+        wordWrap = UserDefaults.standard.object(forKey: "WordWrap") as? Bool ?? true
     }
     
     func save() {
@@ -286,9 +294,7 @@ struct SettingsView: View {
                 }
                 
                 Divider()
-                
-                Divider()
-                
+
                 HStack {
                     Text("Tab Size")
                     Spacer()

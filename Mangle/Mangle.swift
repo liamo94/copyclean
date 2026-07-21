@@ -29,6 +29,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     var historyDeleteAction: (() -> Void)?
     var historyFocusSearchAction: (() -> Void)?
     var keyEventMonitor: Any?
+    var clipboardChangeCountOnHide: Int = 0
     
     func applicationDidFinishLaunching(_ notification: Notification) {
         AppDelegate.shared = self
@@ -98,6 +99,21 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             return nil
         }
         
+        // Hide editor/history when user switches to another app
+        NotificationCenter.default.addObserver(
+            self, selector: #selector(appDidResignActive),
+            name: NSApplication.didResignActiveNotification, object: nil
+        )
+        
+        // Register with macOS Accessibility. The prompt call triggers the OS dialog (which adds Mangle
+        // to the Settings list). The AX read attempt below also forces TCC registration even if the
+        // dialog is suppressed. Both are safe no-ops when permission is already granted.
+        let axOptions = [kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String: true] as CFDictionary
+        AXIsProcessTrustedWithOptions(axOptions)
+        let sysEl = AXUIElementCreateSystemWide()
+        var _unused: CFTypeRef?
+        AXUIElementCopyAttributeValue(sysEl, kAXFocusedApplicationAttribute as CFString, &_unused)
+        
         // Hide dock icon for a cleaner utility app experience
         NSApp.setActivationPolicy(.accessory)
         
@@ -147,11 +163,18 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     }
     
     @objc func showEditorFromMenu() {
-        let text = selectedTextFromFrontmostApp() ?? NSPasteboard.general.string(forType: .string) ?? ""
+        closeHistory()
+        let text = (AXIsProcessTrusted() ? selectedTextFromFrontmostApp() : nil) ?? NSPasteboard.general.string(forType: .string) ?? ""
         editorViewModel.load(text)
         editorViewModel.sourceEntryID = nil
         editorViewModel.languageIsManual = false
         presentEditorWindow()
+    }
+    
+    @objc func appDidResignActive() {
+        clipboardChangeCountOnHide = NSPasteboard.general.changeCount
+        editorWindow?.orderOut(nil)
+        historyWindow?.orderOut(nil)
     }
     
     @objc func clearHistory() {
@@ -163,6 +186,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         closeHistory()
         
         if let window = settingsWindow {
+            centerWindow(window, on: screenAtCursor())
             window.makeKeyAndOrderFront(nil)
             NSApp.activate(ignoringOtherApps: true)
         } else {
@@ -174,13 +198,13 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         let contentView = SettingsView()
         
         let window = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 350, height: 480),
+            contentRect: NSRect(x: 0, y: 0, width: 350, height: 540),
             styleMask: [.titled, .closable],
             backing: .buffered,
             defer: false
         )
         
-        window.center()
+        centerWindow(window, on: screenAtCursor())
         window.title = "Mangle Settings"
         window.contentView = NSHostingView(rootView: contentView)
         window.isReleasedWhenClosed = false
@@ -263,11 +287,18 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     }
     
     @objc func showHistory() {
-        closeEditor()
         closeSettings()
         
-        historyWindow?.close()
-        historyWindow = nil
+        // If we have a preserved history window (user was editing a history entry),
+        // restore it rather than starting fresh
+        if let hw = historyWindow {
+            editorWindow?.orderOut(nil)
+            NSRunningApplication.current.activate(options: [.activateAllWindows, .activateIgnoringOtherApps])
+            hw.makeKeyAndOrderFront(nil)
+            return
+        }
+        
+        closeEditor()
         createHistoryWindow()
     }
     
@@ -289,7 +320,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             defer: false
         )
         
-        window.center()
+        positionWindowNearCursor(window)
         window.title = "Recent Snippets"
         window.identifier = NSUserInterfaceItemIdentifier("history")
         window.contentView = NSHostingView(rootView: contentView)
@@ -335,8 +366,10 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         if let lang = entry.language {
             editorViewModel.currentLanguage = lang
         }
-        closeHistory()
-        presentEditorWindow()
+        // Hide but don't destroy — closing the editor returns here
+        let origin = historyWindow?.frame.origin
+        historyWindow?.orderOut(nil)
+        presentEditorWindow(at: origin)
     }
     
     func closeHistory() {
@@ -353,21 +386,46 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             return
         }
         
-        // If history is open, skip selection detection to avoid interfering with it
+        // If we were editing a history entry, restore the editor for that entry
+        if historyWindow != nil && editorViewModel.sourceEntryID != nil {
+            historyWindow?.orderOut(nil)
+            NSRunningApplication.current.activate(options: [.activateAllWindows, .activateIgnoringOtherApps])
+            editorWindow?.makeKeyAndOrderFront(nil)
+            return
+        }
+        
+        // If history is open (fresh, no entry being edited), close it and open editor from clipboard
         if historyWindow != nil {
+            closeHistory()
             editorViewModel.load(NSPasteboard.general.string(forType: .string) ?? "")
             presentEditorWindow()
             return
         }
         
-        // Try Accessibility API first — reads selected text without a Cmd+C simulation
-        if let selected = selectedTextFromFrontmostApp(), !selected.isEmpty {
+        // Snapshot whether the editor has hidden unsaved content worth restoring
+        let hiddenContent = (editorWindow?.isVisible == false && !editorViewModel.text.isEmpty)
+        ? editorViewModel.text : nil
+        
+        // Try AX first — instant, no side effects
+        if AXIsProcessTrusted(), let selected = selectedTextFromFrontmostApp(), !selected.isEmpty {
             editorViewModel.load(selected)
             presentEditorWindow()
             return
         }
         
-        // Fallback: simulate Cmd+C and wait for the clipboard to change
+        // Without AX permission, use clipboard directly (restore if nothing new)
+        guard AXIsProcessTrusted() else {
+            let clipboard = NSPasteboard.general.string(forType: .string) ?? ""
+            if let old = hiddenContent, NSPasteboard.general.changeCount == clipboardChangeCountOnHide {
+                restoreHiddenEditor(old)
+            } else {
+                editorViewModel.load(clipboard)
+                presentEditorWindow()
+            }
+            return
+        }
+        
+        // Simulate Cmd+C — this also catches selections in apps that don't expose AX text
         let pasteboard = NSPasteboard.general
         let previousText = pasteboard.string(forType: .string) ?? ""
         let savedChangeCount = pasteboard.changeCount
@@ -383,12 +441,14 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) { [weak self] in
             guard let self = self else { return }
             let newText = pasteboard.string(forType: .string) ?? ""
-            // Use the new clipboard only if Cmd+C actually copied something new
-            let text = (pasteboard.changeCount != savedChangeCount && !newText.isEmpty && newText != previousText)
-            ? newText
-            : previousText
-            self.editorViewModel.load(text)
-            self.presentEditorWindow()
+            let gotNewText = pasteboard.changeCount != savedChangeCount && !newText.isEmpty && newText != previousText
+            if let old = hiddenContent, !gotNewText {
+                // Nothing new from Cmd+C either — restore unsaved content
+                self.restoreHiddenEditor(old)
+            } else {
+                self.editorViewModel.load(gotNewText ? newText : previousText)
+                self.presentEditorWindow()
+            }
         }
     }
     
@@ -406,20 +466,27 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         return text
     }
     
-    private func presentEditorWindow() {
-        closeHistory()
+    private func presentEditorWindow(at origin: NSPoint? = nil) {
         closeSettings()
         
         if let window = editorWindow {
+            NSRunningApplication.current.activate(options: [.activateAllWindows, .activateIgnoringOtherApps])
             window.makeKeyAndOrderFront(nil)
-            NSApp.activate(ignoringOtherApps: true)
+            // Position after makeKeyAndOrderFront so our placement overrides any macOS window restoration
+            if let origin = origin {
+                window.setFrameOrigin(origin)
+            } else {
+                positionWindowNearCursor(window)
+            }
         } else {
-            createEditorWindow()
+            createEditorWindow(at: origin)
         }
         
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
             if let window = self.editorWindow,
                let textView = self.findTextView(in: window.contentView) {
+                NSRunningApplication.current.activate(options: [.activateAllWindows, .activateIgnoringOtherApps])
+                window.makeKey()
                 window.makeFirstResponder(textView)
                 textView.setSelectedRange(NSRange(location: 0, length: 0))
                 textView.scrollRangeToVisible(NSRange(location: 0, length: 0))
@@ -427,7 +494,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
     
-    func createEditorWindow() {
+    func createEditorWindow(at origin: NSPoint? = nil) {
         let contentView = EditorView(viewModel: editorViewModel, onSave: { [weak self] in
             self?.saveToClipboard()
         }, onClose: { [weak self] in
@@ -441,16 +508,21 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             defer: false
         )
         
-        window.center()
+        if let origin = origin {
+            window.setFrameOrigin(origin)
+        } else {
+            positionWindowNearCursor(window)
+        }
         window.title = "Mangle"
         window.contentView = NSHostingView(rootView: contentView)
         window.level = .floating
         window.isReleasedWhenClosed = false
+        window.isRestorable = false
         window.collectionBehavior = [.moveToActiveSpace]
         
         self.editorWindow = window
+        NSRunningApplication.current.activate(options: [.activateAllWindows, .activateIgnoringOtherApps])
         window.makeKeyAndOrderFront(nil)
-        NSApp.activate(ignoringOtherApps: true)
     }
     
     func saveToClipboard() {
@@ -470,8 +542,30 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         
         editorViewModel.sourceEntryID = nil
         editorViewModel.markSaved()
+        closeHistory()
         closeEditor()
         showToast("Copied to clipboard")
+    }
+    
+    private func screenAtCursor() -> NSScreen {
+        let point = NSEvent.mouseLocation
+        return NSScreen.screens.first(where: { NSMouseInRect(point, $0.frame, false) }) ?? NSScreen.main ?? NSScreen.screens[0]
+    }
+    
+    private func centerWindow(_ window: NSWindow, on screen: NSScreen) {
+        let sf = screen.visibleFrame
+        let wf = window.frame
+        window.setFrameOrigin(NSPoint(x: sf.midX - wf.width / 2, y: sf.midY - wf.height / 2))
+    }
+    
+    private func positionWindowNearCursor(_ window: NSWindow) {
+        let screen = screenAtCursor()
+        let cursor = NSEvent.mouseLocation
+        let sf = screen.visibleFrame
+        let wf = window.frame
+        let x = max(sf.minX, min(cursor.x - wf.width / 2,  sf.maxX - wf.width))
+        let y = max(sf.minY, min(cursor.y - wf.height / 2, sf.maxY - wf.height))
+        window.setFrameOrigin(NSPoint(x: x, y: y))
     }
     
     func showToast(_ message: String) {
@@ -481,7 +575,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     }
     
     private func _showToast(_ message: String) {
-        guard let screen = NSScreen.main else { return }
+        let screen = screenAtCursor()
         
         // Pure AppKit toast — avoids NSHostingView constraint loops in borderless panels.
         let hPad: CGFloat = 12
@@ -555,8 +649,24 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
     
+    private func restoreHiddenEditor(_ text: String) {
+        guard let window = editorWindow else { return }
+        editorViewModel.load(text)
+        NSRunningApplication.current.activate(options: [.activateAllWindows, .activateIgnoringOtherApps])
+        window.makeKeyAndOrderFront(nil)
+        positionWindowNearCursor(window)
+    }
+    
     func closeEditor() {
         editorWindow?.orderOut(nil)
+        // Cancelling an edit ends the history→editor context, so clear the source reference.
+        // This ensures the next editor open is treated as fresh (cursor-positioned) rather
+        // than a restore, even if historyWindow is still alive but hidden.
+        editorViewModel.sourceEntryID = nil
+        if let hw = historyWindow {
+            NSRunningApplication.current.activate(options: [.activateAllWindows, .activateIgnoringOtherApps])
+            hw.makeKeyAndOrderFront(nil)
+        }
     }
     
     func closeSettings() {
