@@ -12,22 +12,76 @@ enum AppTheme {
     static let gutterDarkBG = NSColor(red: 0.09, green: 0.11, blue: 0.11, alpha: 1.0)
 }
 
+// MARK: - Editor Font
+
+enum EditorFont: String, CaseIterable, Identifiable, Hashable {
+    case system = "System"
+    case sfMono = "SF Mono"
+    case menlo = "Menlo"
+    case monaco = "Monaco"
+    case courierNew = "Courier New"
+    case andaleMono = "Andale Mono"
+
+    var id: String { rawValue }
+
+    private var postScriptName: String? {
+        switch self {
+        case .system: return nil
+        case .sfMono: return "SFMono-Regular"
+        case .menlo: return "Menlo-Regular"
+        case .monaco: return "Monaco"
+        case .courierNew: return "CourierNewPSMT"
+        case .andaleMono: return "AndaleMono"
+        }
+    }
+
+    func nsFont(size: CGFloat) -> NSFont {
+        guard let name = postScriptName, let font = NSFont(name: name, size: size) else {
+            return .monospacedSystemFont(ofSize: size, weight: .regular)
+        }
+        return font
+    }
+}
+
 // MARK: - Line Number Gutter
 
 class LineNumberRulerView: NSRulerView {
-    var fontSize: CGFloat = NSFont.systemFontSize
+    var fontSize: CGFloat = NSFont.systemFontSize { didSet { if fontSize != oldValue { updateThickness() } } }
     var activeLine: Int = 0
+    private var digitCount = 1
+    private var thickness: CGFloat = 44
     
     override var isFlipped: Bool { true }
-    override var requiredThickness: CGFloat { 44 }
+    override var requiredThickness: CGFloat { thickness }
+    
+    /// Widen the gutter once line numbers need more digits than the default width fits.
+    func setLineCount(_ count: Int) {
+        let digits = String(max(count, 1)).count
+        guard digits != digitCount else { return }
+        digitCount = digits
+        updateThickness()
+    }
+    
+    private func updateThickness() {
+        let font = NSFont.monospacedSystemFont(ofSize: fontSize * 0.85, weight: .semibold)
+        let digitWidth = ("8" as NSString).size(withAttributes: [.font: font]).width
+        let newThickness = max(44, ceil(CGFloat(digitCount) * digitWidth + 22))
+        guard newThickness != thickness else { return }
+        thickness = newThickness
+        scrollView?.tile()
+        needsDisplay = true
+    }
     
     override func drawHashMarksAndLabels(in rect: NSRect) {
         guard let textView = clientView as? NSTextView,
               let layoutManager = textView.layoutManager,
               let container = textView.textContainer else { return }
         
-        let isDark = NSApp.effectiveAppearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
-        (isDark ? AppTheme.gutterDarkBG : NSColor(white: 0.95, alpha: 1.0)).setFill()
+        let isDark = effectiveAppearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
+        // Derived from the editor background so the gutter suits whichever syntax theme is active.
+        let editorBG = textView.backgroundColor.usingColorSpace(.deviceRGB) ?? textView.backgroundColor
+        (editorBG.blended(withFraction: isDark ? 0.18 : 0.04, of: .black)
+            ?? (isDark ? AppTheme.gutterDarkBG : NSColor(white: 0.95, alpha: 1.0))).setFill()
         bounds.fill()
         
         (isDark ? AppTheme.teal.withAlphaComponent(0.45) : AppTheme.teal.withAlphaComponent(0.25)).setStroke()
@@ -50,16 +104,14 @@ class LineNumberRulerView: NSRulerView {
             : AppTheme.teal
         ]
         
-        layoutManager.ensureLayout(for: container)
-        
         let text  = textView.string as NSString
         let len   = text.length
         let inset = textView.textContainerInset.height
-        let width = requiredThickness
+        let width = bounds.width
         let h     = bounds.height
         // Read scroll position directly from the text view — always current at draw time.
         let scrollOffset = textView.visibleRect.origin.y
-        
+
         func drawNum(_ n: Int, _ docY: CGFloat) {
             // docY is layout-manager space. Add inset → text-view/document space.
             // Subtract scrollOffset → position relative to the ruler's visible top.
@@ -70,11 +122,27 @@ class LineNumberRulerView: NSRulerView {
             let sz = s.size(withAttributes: attrs)
             s.draw(at: NSPoint(x: width - sz.width - 10, y: y), withAttributes: attrs)
         }
-        
+
         if len == 0 { drawNum(1, 0); return }
-        
-        var charIdx = 0
-        var lineNum = 1
+
+        // Walk only the visible (+ padding) glyph range. glyphRange(forBoundingRect:) lays out
+        // just that region (non-contiguous layout is on), so we never force a whole-document
+        // layout here — that used to make every keystroke O(document) on long files.
+        var visibleRect = textView.visibleRect
+        visibleRect.origin.y -= 200 + inset
+        visibleRect.size.height += 400
+        let visibleGlyphRange = layoutManager.glyphRange(forBoundingRect: visibleRect, in: container)
+        var visibleCharRange = layoutManager.characterRange(forGlyphRange: visibleGlyphRange, actualGlyphRange: nil)
+        visibleCharRange.length = min(visibleCharRange.length, len - visibleCharRange.location)
+
+        var lineStart = 0
+        text.getLineStart(&lineStart, end: nil, contentsEnd: nil, for: NSRange(location: visibleCharRange.location, length: 0))
+
+        var lineNum = (textView as? MangleTextView)?.lineNumber(at: lineStart)
+            ?? text.countNewlines(in: NSRange(location: 0, length: lineStart)) + 1
+
+        let visibleEnd = min(visibleCharRange.location + visibleCharRange.length, len)
+        var charIdx = lineStart
         while charIdx < len {
             let lineRange = text.lineRange(for: NSRange(location: charIdx, length: 0))
             let glyphIdx  = layoutManager.glyphIndexForCharacter(at: charIdx)
@@ -84,12 +152,48 @@ class LineNumberRulerView: NSRulerView {
             }
             lineNum += 1
             charIdx = NSMaxRange(lineRange)
+            if charIdx > visibleEnd { break }
         }
-        
-        if len > 0 && text.character(at: len - 1) == ("\n" as NSString).character(at: 0) {
+
+        if charIdx >= len && text.character(at: len - 1) == 10 {
             let extra = layoutManager.extraLineFragmentRect
             if extra != .zero { drawNum(lineNum, extra.origin.y) }
         }
+    }
+}
+
+extension NSString {
+    /// Counts "\n" in `range` using a fixed-size buffer (no per-call allocation proportional
+    /// to the document, no substring/array churn).
+    func countNewlines(in range: NSRange) -> Int {
+        let chunk = 4096
+        var count = 0
+        var loc = range.location
+        let end = NSMaxRange(range)
+        withUnsafeTemporaryAllocation(of: unichar.self, capacity: chunk) { buf in
+            guard let base = buf.baseAddress else { return }
+            while loc < end {
+                let n = min(chunk, end - loc)
+                getCharacters(base, range: NSRange(location: loc, length: n))
+                for i in 0..<n where base[i] == 10 { count += 1 }
+                loc += n
+            }
+        }
+        return count
+    }
+    
+    /// Non-overlapping occurrences of `needle` within `range`.
+    func occurrences(of needle: String, in range: NSRange) -> Int {
+        var count = 0
+        var search = range
+        while search.length > 0 {
+            let found = self.range(of: needle, options: .literal, range: search)
+            if found.location == NSNotFound { break }
+            count += 1
+            let next = NSMaxRange(found)
+            search = NSRange(location: next, length: NSMaxRange(range) - next)
+        }
+        return count
     }
 }
 
@@ -99,15 +203,19 @@ struct EditorView: View {
     @ObservedObject var viewModel: EditorViewModel
     @ObservedObject private var settings = SettingsManager.shared
     var onSave: () -> Void
+    var onSaveAndPaste: () -> Void = {}
     var onClose: () -> Void
-    @FocusState private var isTextEditorFocused: Bool
+    @Environment(\.colorScheme) private var colorScheme
     @State private var keyMonitor: Any?
     @State private var textView: NSTextView?
     @State private var showFindBar = false
-    @State private var findText = ""
+    // Restored from the last search so reopening Find doesn't start from scratch.
+    @State private var findText = UserDefaults.standard.string(forKey: EditorView.lastFindTextKey) ?? ""
     @State private var replaceText = ""
     @State private var matchCount = 0
+    @State private var isInvalidRegex = false
     @FocusState private var isFindFieldFocused: Bool
+    @FocusState private var isReplaceFieldFocused: Bool
     @State private var showShortcuts = false
     @State private var hoverTransform = false
     @State private var hoverCancel = false
@@ -115,17 +223,32 @@ struct EditorView: View {
     @State private var hoverSave = false
     @State private var hoverWordWrap = false
     
-    // Feature 1 – Cursor position
-    @State private var cursorLine: Int = 1
-    @State private var cursorColumn: Int = 1
+    // Find options (restored from the last search)
+    @State private var useRegex = UserDefaults.standard.bool(forKey: EditorView.lastFindRegexKey)
+    @State private var caseSensitive = UserDefaults.standard.bool(forKey: EditorView.lastFindCaseKey)
+    @State private var wholeWord = UserDefaults.standard.bool(forKey: EditorView.lastFindWordKey)
+    @State private var matchRanges: [NSRange] = []
+    @State private var currentMatchIndex: Int?
+
+    private static let lastFindTextKey = "MangleLastFindText"
+    private static let lastFindRegexKey = "MangleLastFindRegex"
+    private static let lastFindCaseKey = "MangleLastFindCase"
+    private static let lastFindWordKey = "MangleLastFindWholeWord"
     
-    // Feature 2 – Regex toggle
-    @State private var useRegex = false
+    // Command palette (⌘K) — also hosts Go to Line (⌃G opens it with ":")
+    @State private var showPalette = false
+    @State private var paletteQuery = ""
+    @State private var paletteIndex = 0
+    @State private var hoverPaste = false
     
     // Feature 3 – Unsaved changes warning
     @State private var showCancelAlert = false
-    
-    
+
+    // Smart-select / expand selection (⌥⇧↑ expand, ⌥⇧↓ shrink)
+    @State private var selectionHistory: [NSRange] = []
+    @State private var lastExpandResult: NSRange? = nil
+
+
     @State private var needsAccessibility = !AXIsProcessTrusted()
     
     private static let languages: [(label: String, id: String)] = [
@@ -136,30 +259,26 @@ struct EditorView: View {
         ("C++", "cpp"),
         ("CSS", "css"),
         ("Diff", "diff"),
+        ("GraphQL", "graphql"),
         ("Go", "go"),
         ("HTML", "xml"),
         ("Java", "java"),
         ("JavaScript", "javascript"),
         ("JSON", "json"),
         ("Kotlin", "kotlin"),
+        ("LESS", "less"),
         ("Markdown", "markdown"),
         ("Perl", "perl"),
         ("PHP", "php"),
         ("Python", "python"),
         ("Ruby", "ruby"),
         ("Rust", "rust"),
+        ("SCSS", "scss"),
         ("SQL", "sql"),
         ("Swift", "swift"),
         ("TypeScript", "typescript"),
         ("YAML", "yaml"),
     ]
-    
-    private var textStats: (lines: Int, words: Int, chars: Int) {
-        let t = viewModel.text
-        let lines = t.isEmpty ? 1 : t.components(separatedBy: "\n").count
-        let words = t.split { $0.isWhitespace || $0.isNewline }.count
-        return (lines, words, t.count)
-    }
     
     var body: some View {
         VStack(spacing: 0) {
@@ -172,20 +291,24 @@ struct EditorView: View {
             }
             
             CustomTextEditor(
-                text: $viewModel.text,
-                language: $viewModel.currentLanguage,
+                text: viewModel.loadedText,
+                loadGeneration: viewModel.loadGeneration,
+                language: viewModel.currentLanguage,
                 fontSize: settings.fontSize,
+                editorFont: settings.editorFont,
                 wordWrap: settings.wordWrap,
-                manualLanguage: viewModel.languageIsManual,
+                isDark: colorScheme == .dark,
+                themeName: settings.themeName(isDark: colorScheme == .dark),
+                status: viewModel.status,
                 onTextViewReady: { tv in
                     textView = tv
+                    viewModel.textView = tv
                 },
-                onCursorChange: { line, col in
-                    cursorLine = line
-                    cursorColumn = col
+                onTextChange: {
+                    // Keep find highlights/count in sync with edits (debounced by the editor).
+                    if showFindBar { highlightMatches() }
                 }
             )
-            .focused($isTextEditorFocused)
             
             Divider()
             
@@ -193,18 +316,45 @@ struct EditorView: View {
         }
         .frame(minWidth: 400, minHeight: 320)
         .background {
-            Button("") {
-                showFindBar.toggle()
-                if showFindBar { isFindFieldFocused = true }
+            Group {
+                Button("") {
+                    showFindBar.toggle()
+                    if showFindBar {
+                        isFindFieldFocused = true
+                        highlightMatches()
+                    }
+                }
+                .keyboardShortcut("f", modifiers: .command)
+                Button("") { onSaveAndPaste() }
+                    .keyboardShortcut(.return, modifiers: .command)
             }
-            .keyboardShortcut("f", modifiers: .command)
             .hidden()
         }
-        .onAppear {
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
-                isTextEditorFocused = true
+        .overlay(alignment: .top) {
+            if showPalette {
+                ZStack(alignment: .top) {
+                    // Clicking anywhere outside the palette dismisses it.
+                    Color.black.opacity(0.001)
+                        .contentShape(Rectangle())
+                        .onTapGesture { closePalette() }
+                    CommandPaletteView(
+                        query: $paletteQuery,
+                        results: paletteResults,
+                        selectedIndex: paletteIndex,
+                        onRun: runPaletteCommand
+                    )
+                    .padding(.top, 36)
+                }
             }
+        }
+        .onChange(of: paletteQuery) { paletteIndex = 0 }
+        .onAppear {
+            if let monitor = keyMonitor { NSEvent.removeMonitor(monitor) }
             keyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [self] event in
+                // Local monitors see keys for every window in the app. The editor window is
+                // only hidden (never closed), so without this check its shortcuts fired in
+                // History/Settings and edited the hidden document.
+                guard let editorWindow = textView?.window, event.window === editorWindow else { return event }
                 let mods = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
                 
                 // When discard alert is open, intercept its shortcuts first
@@ -217,11 +367,75 @@ struct EditorView: View {
                         showCancelAlert = false
                         closeFindBar()
                         onClose()
+                        viewModel.discard()
                         return nil
                     }
                     return nil // swallow all other keys while alert is open
                 }
+
+                // If focus went back to the document (e.g. a click), the palette is done —
+                // keys must reach the editor, not run palette commands.
+                if showPalette, let tv = textView, tv.window?.firstResponder === tv {
+                    closePalette()
+                    return event
+                }
+                // The palette keeps focus in its search field; drive its list from here.
+                if showPalette {
+                    let results = paletteResults
+                    switch event.keyCode {
+                    case 53: // Escape
+                        closePalette()
+                        return nil
+                    case 125: // Down
+                        paletteIndex = min(paletteIndex + 1, max(results.count - 1, 0))
+                        return nil
+                    case 126: // Up
+                        paletteIndex = max(paletteIndex - 1, 0)
+                        return nil
+                    case 36, 76: // Return / Enter
+                        if results.indices.contains(paletteIndex) { runPaletteCommand(results[paletteIndex]) }
+                        return nil
+                    default:
+                        return event
+                    }
+                }
                 
+                // Escape collapses multiple selections before anything else.
+                if event.keyCode == 53, let mtv = textView as? MangleTextView, mtv.hasMultipleSelections {
+                    mtv.collapseMultipleSelections()
+                    return nil
+                }
+
+                // Escape dismisses Find first (matching Xcode/VS Code/Safari) — only a
+                // second Escape, with Find already closed, should close the editor.
+                if event.keyCode == 53, showFindBar { // Escape
+                    closeFindBar()
+                    return nil
+                }
+
+                // These shortcuts mutate the main document; while Find/Replace has focus,
+                // let the key fall through to the field instead (e.g. don't duplicate a
+                // line behind the search bar because the user held ⌘ while searching).
+                let editingFieldFocused = isFindFieldFocused || isReplaceFieldFocused
+
+                let key = event.charactersIgnoringModifiers?.lowercased()
+                let mtv = textView as? MangleTextView
+                
+                // Find navigation works from the find field too.
+                if mods == .command, key == "g" { findNext(); return nil }
+                if mods == [.command, .shift], key == "g" { findPrevious(); return nil }
+                if mods == .command, key == "k" { openPalette(); return nil }
+                if mods == [.command, .shift], key == "p" { openPalette(); return nil }
+                if mods == .control, key == "g" { openPalette(query: ":"); return nil }
+                
+                if !editingFieldFocused {
+                    if mods == .command, key == "e" { useSelectionForFind(); return nil }
+                    if mods == .command, key == "/" { toggleComment(); return nil }
+                    if mods == [.command, .shift], key == "d" { if let tv = textView { duplicateLine(in: tv) }; return nil }
+                    if mods == [.control, .command], key == "g" { mtv?.selectAllOccurrences(); return nil }
+                    if mods == .option, event.keyCode == 6 { settings.wordWrap.toggle(); return nil } // ⌥Z
+                }
+
                 if mods == .command {
                     switch event.charactersIgnoringModifiers {
                     case "=", "+":
@@ -234,26 +448,40 @@ struct EditorView: View {
                         settings.fontSize = NSFont.systemFontSize
                         return nil
                     case "d":
-                        if let tv = textView { duplicateLine(in: tv) }
+                        guard !editingFieldFocused else { break }
+                        mtv?.selectNextOccurrence()
                         return nil
                     case "l":
+                        guard !editingFieldFocused else { break }
                         if let tv = textView { selectLine(in: tv) }
                         return nil
                     default: break
                     }
                 }
-                
+
                 if mods == [.command, .shift],
-                   event.charactersIgnoringModifiers?.lowercased() == "k" {
+                   event.charactersIgnoringModifiers?.lowercased() == "k",
+                   !editingFieldFocused {
                     if let tv = textView { deleteLine(in: tv) }
                     return nil
                 }
-                
+
+                if mods == [.option, .shift], !editingFieldFocused {
+                    if event.keyCode == 126 { // Up — expand selection
+                        if let tv = textView { expandSelection(in: tv) }
+                        return nil
+                    }
+                    if event.keyCode == 125 { // Down — shrink selection
+                        if let tv = textView { shrinkSelection(in: tv) }
+                        return nil
+                    }
+                }
+
                 let optionOnly = mods.contains(.option)
                 && !mods.contains(.command)
                 && !mods.contains(.shift)
                 && !mods.contains(.control)
-                if optionOnly {
+                if optionOnly, !editingFieldFocused {
                     if event.keyCode == 126 {
                         if let tv = textView { moveLine(in: tv, up: true) }
                         return nil
@@ -263,7 +491,7 @@ struct EditorView: View {
                         return nil
                     }
                 }
-                
+
                 return event
             }
         }
@@ -306,6 +534,7 @@ struct EditorView: View {
                                 showCancelAlert = false
                                 closeFindBar()
                                 onClose()
+                                viewModel.discard()
                             } label: {
                                 HStack(alignment: .firstTextBaseline, spacing: 6) {
                                     Text("Discard")
@@ -387,49 +616,37 @@ struct EditorView: View {
                 TextField("Find", text: $findText)
                     .textFieldStyle(.roundedBorder)
                     .focused($isFindFieldFocused)
-                    .onChange(of: findText) { highlightMatches() }
+                    .onChange(of: findText) {
+                        highlightMatches()
+                        UserDefaults.standard.set(findText, forKey: Self.lastFindTextKey)
+                    }
                     .onSubmit { findNext() }
-                // Feature 2 – regex toggle button
-                Button {
-                    useRegex.toggle()
-                    highlightMatches()
-                } label: {
-                    Text(".*")
-                        .font(.system(size: 11, weight: .medium, design: .monospaced))
-                        .foregroundColor(useRegex ? .white : .secondary)
-                        .padding(.horizontal, 6)
-                        .padding(.vertical, 2)
-                        .background(useRegex ? AppTheme.tealSUI : Color.secondary.opacity(0.15), in: RoundedRectangle(cornerRadius: 4))
+                findToggle("Aa", isOn: caseSensitive, help: "Match Case") {
+                    caseSensitive.toggle()
+                    UserDefaults.standard.set(caseSensitive, forKey: Self.lastFindCaseKey)
                 }
-                .buttonStyle(.borderless)
-                .help("Use Regular Expression")
+                findToggle("ab", isOn: wholeWord, help: "Whole Word", underline: true) {
+                    wholeWord.toggle()
+                    UserDefaults.standard.set(wholeWord, forKey: Self.lastFindWordKey)
+                }
+                findToggle(".*", isOn: useRegex, help: "Use Regular Expression") {
+                    useRegex.toggle()
+                    UserDefaults.standard.set(useRegex, forKey: Self.lastFindRegexKey)
+                }
                 
                 if isInvalidRegex {
-                    Text("Invalid")
-                        .font(.caption)
-                        .foregroundColor(.white)
-                        .padding(.horizontal, 6)
-                        .padding(.vertical, 2)
-                        .background(Color.red.opacity(0.7), in: Capsule())
+                    findBadge("Invalid", color: Color.red.opacity(0.7))
                 } else if matchCount > 0 {
-                    Text("\(matchCount)")
-                        .font(.caption.monospacedDigit())
-                        .foregroundColor(.white)
-                        .padding(.horizontal, 6)
-                        .padding(.vertical, 2)
-                        .background(AppTheme.tealSUI, in: Capsule())
+                    findBadge(currentMatchIndex.map { "\($0 + 1) of \(matchCount)" } ?? "\(matchCount)", color: AppTheme.tealSUI)
                 } else if !findText.isEmpty {
-                    Text("0")
-                        .font(.caption.monospacedDigit())
-                        .foregroundColor(.white)
-                        .padding(.horizontal, 6)
-                        .padding(.vertical, 2)
-                        .background(Color.secondary.opacity(0.5), in: Capsule())
+                    findBadge("0", color: Color.secondary.opacity(0.5))
                 }
                 Button(action: findPrevious) { Image(systemName: "chevron.up") }
                     .buttonStyle(.borderless)
+                    .help("Previous Match (⇧⌘G)")
                 Button(action: findNext) { Image(systemName: "chevron.down") }
                     .buttonStyle(.borderless)
+                    .help("Next Match (⌘G)")
                 Button(action: closeFindBar) { Image(systemName: "xmark") }
                     .buttonStyle(.borderless)
                     .foregroundColor(.secondary)
@@ -440,6 +657,7 @@ struct EditorView: View {
                     .frame(width: 16)
                 TextField("Replace", text: $replaceText)
                     .textFieldStyle(.roundedBorder)
+                    .focused($isReplaceFieldFocused)
                     .onSubmit { replaceCurrent() }
                 Button("Replace") { replaceCurrent() }
                     .tint(AppTheme.tealSUI)
@@ -450,6 +668,33 @@ struct EditorView: View {
         .padding(.horizontal, 12)
         .padding(.vertical, 8)
         .background(Color(nsColor: .controlBackgroundColor))
+    }
+    
+    private func findToggle(_ label: String, isOn: Bool, help: String, underline: Bool = false, action: @escaping () -> Void) -> some View {
+        Button {
+            action()
+            highlightMatches()
+        } label: {
+            Text(label)
+                .font(.system(size: 11, weight: .medium, design: .monospaced))
+                .underline(underline)
+                .foregroundColor(isOn ? .white : .secondary)
+                .padding(.horizontal, 6)
+                .padding(.vertical, 2)
+                .background(isOn ? AppTheme.tealSUI : Color.secondary.opacity(0.15), in: RoundedRectangle(cornerRadius: 4))
+        }
+        .buttonStyle(.borderless)
+        .help(help)
+    }
+    
+    private func findBadge(_ text: String, color: Color) -> some View {
+        Text(text)
+            .font(.caption.monospacedDigit())
+            .foregroundColor(.white)
+            .padding(.horizontal, 6)
+            .padding(.vertical, 2)
+            .background(color, in: Capsule())
+            .fixedSize()
     }
     
     // MARK: - Language Picker
@@ -483,6 +728,9 @@ struct EditorView: View {
     // MARK: - Bottom Bar
     
     private var bottomBar: some View {
+        // Cursor position and stats live in their own small views observing `EditorStatus`,
+        // so typing and caret moves re-render just those labels — not this whole bar
+        // (and its Transform menu) or the editor view around it.
         ViewThatFits(in: .horizontal) {
             bottomBarHStack(showStats: true,  showKeyboard: true)
             bottomBarHStack(showStats: false, showKeyboard: true)
@@ -491,27 +739,29 @@ struct EditorView: View {
         .frame(height: 36)
         .background(Color(nsColor: .windowBackgroundColor))
     }
-    
+
     @ViewBuilder
     private func bottomBarHStack(showStats: Bool, showKeyboard: Bool) -> some View {
         HStack(spacing: 0) {
-            // Cursor position
-            Text("\(cursorLine):\(cursorColumn)")
-                .font(.system(size: 12).monospacedDigit())
-                .foregroundColor(AppTheme.tealSUI)
-                .fixedSize()
+            CursorPositionLabel(status: viewModel.status)
                 .padding(.horizontal, 10)
-            
+
             barDivider
-            
+
             if showStats {
-                HStack(spacing: 10) {
-                    statPill(value: "\(textStats.lines)", label: "ln", valueWidth: 18)
-                    statPill(value: "\(textStats.words)", label: "wd", valueWidth: 24)
-                    statPill(value: "\(textStats.chars)", label: "ch", valueWidth: 34)
-                }
-                .fixedSize()
-                .padding(.horizontal, 10)
+                TextStatsLabel(status: viewModel.status)
+                    .padding(.horizontal, 10)
+                barDivider
+            }
+            
+            if showKeyboard {
+                DocumentFormatMenu(
+                    status: viewModel.status,
+                    onIndentation: setIndentation,
+                    onConvertIndentation: convertIndentation,
+                    onLineEnding: convertLineEndings
+                )
+                .padding(.horizontal, 8)
                 barDivider
             }
             
@@ -521,148 +771,13 @@ struct EditorView: View {
                     languagePickerItems
                 }
                 
-                Divider()
-                
-                if viewModel.currentLanguage == "json" || PrettierFormatter.shared.canFormat(language: viewModel.currentLanguage) {
-                    Button("Format Code") { formatCode() }
-                        .keyboardShortcut("f", modifiers: [.command, .shift])
+                ForEach(transformSections, id: \.title) { section in
                     Divider()
-                }
-                
-                Section("Whitespace") {
-                    Button("Trim Whitespace") {
-                        transform { text in
-                            let lines = text.components(separatedBy: "\n")
-                            let minIndent = lines
-                                .filter { !$0.trimmingCharacters(in: .whitespaces).isEmpty }
-                                .map { $0.prefix(while: { $0 == " " || $0 == "\t" }).count }
-                                .min() ?? 0
-                            return lines
-                                .map { line in
-                                    let dedented = line.count >= minIndent ? String(line.dropFirst(minIndent)) : line
-                                    return dedented.replacingOccurrences(of: "\\s+$", with: "", options: .regularExpression)
-                                }
-                                .joined(separator: "\n")
-                                .trimmingCharacters(in: .newlines)
-                        }
-                    }
-                    .keyboardShortcut("t", modifiers: [.command, .shift])
-                    
-                    Button("Normalize Indentation") {
-                        transform { text in
-                            let tabWidth = SettingsManager.shared.tabSize
-                            let lines = text.components(separatedBy: "\n")
-                            let expandedLines = lines.map { line -> String in
-                                line.replacingOccurrences(of: "\t", with: String(repeating: " ", count: tabWidth))
-                            }
-                            let minIndent = expandedLines
-                                .filter { !$0.trimmingCharacters(in: .whitespaces).isEmpty }
-                                .map { $0.prefix(while: { $0 == " " }).count }
-                                .min() ?? 0
-                            return expandedLines.map { line in
-                                line.count >= minIndent ? String(line.dropFirst(minIndent)) : line
-                            }.joined(separator: "\n")
-                        }
-                    }
-                    .keyboardShortcut("n", modifiers: [.command, .shift])
-                    
-                    Button("Remove All Indentation") {
-                        transform {
-                            $0.components(separatedBy: "\n")
-                                .map { $0.trimmingCharacters(in: .whitespaces) }
-                                .joined(separator: "\n")
-                        }
-                    }
-                    Button("Remove Blank Lines") {
-                        transform {
-                            $0.components(separatedBy: "\n")
-                                .filter { !$0.trimmingCharacters(in: .whitespaces).isEmpty }
-                                .joined(separator: "\n")
-                        }
-                    }
-                    Button("Tabs → Spaces") {
-                        transform {
-                            let spaces = String(repeating: " ", count: SettingsManager.shared.tabSize)
-                            return $0.replacingOccurrences(of: "\t", with: spaces)
-                        }
-                    }
-                    Button("Spaces → Tabs") {
-                        transform {
-                            let tabSize = SettingsManager.shared.tabSize
-                            return $0.components(separatedBy: "\n").map { line in
-                                var leadingSpaces = 0
-                                for ch in line { if ch == " " { leadingSpaces += 1 } else { break } }
-                                let tabs = leadingSpaces / tabSize
-                                let remainder = leadingSpaces % tabSize
-                                return String(repeating: "\t", count: tabs)
-                                + String(repeating: " ", count: remainder)
-                                + line.dropFirst(leadingSpaces)
-                            }.joined(separator: "\n")
-                        }
-                    }
-                }
-                
-                Section("Case") {
-                    Button("lowercase") { transform { $0.lowercased() } }
-                        .keyboardShortcut("l", modifiers: [.command, .shift])
-                    Button("UPPERCASE") { transform { $0.uppercased() } }
-                        .keyboardShortcut("u", modifiers: [.command, .shift])
-                    Button("Title Case") {
-                        transform {
-                            let small: Set<String> = ["a","an","the","and","but","or","for","nor","so","yet","at","by","in","of","on","to","up","as"]
-                            return $0.components(separatedBy: "\n").map { line in
-                                let words = line.components(separatedBy: " ")
-                                return words.enumerated().map { i, word in
-                                    let lower = word.lowercased()
-                                    if i > 0 && small.contains(lower) { return lower }
-                                    return word.prefix(1).uppercased() + word.dropFirst().lowercased()
-                                }.joined(separator: " ")
-                            }.joined(separator: "\n")
-                        }
-                    }
-                }
-                
-                Section("Lines") {
-                    Button("Sort Lines") {
-                        transform {
-                            $0.components(separatedBy: "\n").sorted().joined(separator: "\n")
-                        }
-                    }
-                    Button("Remove Duplicate Lines") {
-                        transform {
-                            var seen = Set<String>()
-                            return $0.components(separatedBy: "\n")
-                                .filter { seen.insert($0).inserted }
-                                .joined(separator: "\n")
-                        }
-                    }
-                    Button("Reverse Lines") {
-                        transform {
-                            $0.components(separatedBy: "\n").reversed().joined(separator: "\n")
-                        }
-                    }
-                }
-                
-                // Feature 9 – Line endings in Transform menu
-                Section("Line Endings") {
-                    Button("Convert to LF") {
-                        transform {
-                            $0.replacingOccurrences(of: "\r\n", with: "\n")
-                                .replacingOccurrences(of: "\r",   with: "\n")
-                        }
-                    }
-                    Button("Convert to CRLF") {
-                        transform {
-                            let lf = $0.replacingOccurrences(of: "\r\n", with: "\n")
-                                .replacingOccurrences(of: "\r",   with: "\n")
-                            return lf.replacingOccurrences(of: "\n", with: "\r\n")
-                        }
-                    }
-                    Button("Convert to CR") {
-                        transform {
-                            let lf = $0.replacingOccurrences(of: "\r\n", with: "\n")
-                                .replacingOccurrences(of: "\r",   with: "\n")
-                            return lf.replacingOccurrences(of: "\n", with: "\r")
+                    Section(section.title) {
+                        ForEach(section.commands) { cmd in
+                            Button(cmd.title, action: cmd.run)
+                                .keyboardShortcut(cmd.keyboardShortcut)
+                                .disabled(!cmd.isEnabled)
                         }
                     }
                 }
@@ -673,6 +788,7 @@ struct EditorView: View {
             .fixedSize()
             .padding(.horizontal, 8)
             .onHover { hoverTransform = $0 }
+            .keyboardShortcut("t", modifiers: .command)
             
             barDivider
             
@@ -748,6 +864,19 @@ struct EditorView: View {
             .keyboardShortcut("s", modifiers: .command)
             .padding(.horizontal, 8)
             .onHover { hoverSave = $0 }
+            .help("Copy to clipboard and close")
+            
+            barDivider
+            
+            Button {
+                onSaveAndPaste()
+            } label: {
+                bottomAction("Paste", shortcut: "⌘↩", hovered: hoverPaste)
+            }
+            .buttonStyle(.plain)
+            .padding(.horizontal, 8)
+            .onHover { hoverPaste = $0 }
+            .help("Copy, close, and paste into the app you came from")
             
             if showKeyboard {
                 barDivider
@@ -801,142 +930,130 @@ struct EditorView: View {
             .foregroundColor(hovered ? .secondary : .secondary.opacity(0.6))
     }
     
-    @ViewBuilder
-    private func statPill(value: String, label: String, valueWidth: CGFloat) -> some View {
-        HStack(spacing: 3) {
-            Text(value)
-                .monospacedDigit()
-                .foregroundColor(AppTheme.tealSUI)
-                .frame(width: valueWidth, alignment: .trailing)
-            Text(label)
-                .foregroundColor(.secondary)
-        }
-        .font(.caption)
-    }
-    
     // MARK: - Find Logic
     
-    /// Build an NSRegularExpression from the current findText, returning nil when invalid.
-    private func buildRegex() -> NSRegularExpression? {
-        guard useRegex, !findText.isEmpty else { return nil }
-        return try? NSRegularExpression(pattern: findText, options: .caseInsensitive)
+    /// One regex drives every find mode: literal text is escaped, whole-word wraps it in
+    /// word-boundary lookarounds, and case sensitivity is a regex option.
+    private func buildSearchRegex() -> NSRegularExpression? {
+        guard !findText.isEmpty else { return nil }
+        var pattern = useRegex ? findText : NSRegularExpression.escapedPattern(for: findText)
+        if wholeWord { pattern = "(?<![\\p{L}\\p{N}_])(?:" + pattern + ")(?![\\p{L}\\p{N}_])" }
+        return try? NSRegularExpression(pattern: pattern, options: caseSensitive ? [] : [.caseInsensitive])
     }
     
-    private var isInvalidRegex: Bool {
-        guard useRegex, !findText.isEmpty else { return false }
-        return (try? NSRegularExpression(pattern: findText)) == nil
+    private var replacementTemplate: String {
+        useRegex ? replaceText : NSRegularExpression.escapedTemplate(for: replaceText)
     }
-    
+
+    /// Highlights every match. Uses layout-manager temporary attributes (via MangleTextView)
+    /// rather than text-storage attributes: they don't invalidate layout and aren't wiped
+    /// when the syntax highlighter re-colors an edited line.
     private func highlightMatches() {
-        guard let tv = textView, let storage = tv.textStorage else { return }
-        let fullRange = NSRange(location: 0, length: storage.length)
-        storage.removeAttribute(.backgroundColor, range: fullRange)
-        
-        guard !findText.isEmpty else { matchCount = 0; return }
-        
-        let nsText = tv.string as NSString
-        var count = 0
-        
-        if useRegex {
-            guard let regex = buildRegex() else { matchCount = 0; return }
-            let matches = regex.matches(in: tv.string, range: NSRange(location: 0, length: nsText.length))
-            for m in matches {
-                storage.addAttribute(.backgroundColor, value: AppTheme.teal.withAlphaComponent(0.28), range: m.range)
-            }
-            count = matches.count
-        } else {
-            var searchRange = NSRange(location: 0, length: nsText.length)
-            while searchRange.location < nsText.length {
-                let range = nsText.range(of: findText, options: .caseInsensitive, range: searchRange)
-                if range.location == NSNotFound { break }
-                storage.addAttribute(.backgroundColor, value: AppTheme.teal.withAlphaComponent(0.28), range: range)
-                count += 1
-                searchRange.location = range.location + range.length
-                searchRange.length = nsText.length - searchRange.location
-            }
+        guard let tv = textView as? MangleTextView else { return }
+        let regex = buildSearchRegex()
+        isInvalidRegex = !findText.isEmpty && regex == nil
+        guard let regex else {
+            matchCount = 0
+            matchRanges = []
+            currentMatchIndex = nil
+            tv.findRanges = []
+            tv.currentFindRange = nil
+            return
         }
-        matchCount = count
+        let string = tv.string
+        let ranges = regex.matches(in: string, range: NSRange(location: 0, length: (string as NSString).length))
+            .map(\.range)
+            .filter { $0.length > 0 }
+        matchRanges = ranges
+        matchCount = ranges.count
+        // Cap what we paint: a pattern like "." would otherwise add an attribute per character.
+        tv.findRanges = Array(ranges.prefix(10_000))
+        updateCurrentMatch(for: tv.selectedRange())
+    }
+    
+    private func updateCurrentMatch(for selection: NSRange) {
+        // matchRanges is sorted by location — binary search for the selection.
+        var lo = 0, hi = matchRanges.count - 1
+        var found: Int?
+        while lo <= hi {
+            let mid = (lo + hi) / 2
+            let r = matchRanges[mid]
+            if r.location == selection.location { found = r == selection ? mid : nil; break }
+            if r.location < selection.location { lo = mid + 1 } else { hi = mid - 1 }
+        }
+        currentMatchIndex = found
+        (textView as? MangleTextView)?.currentFindRange = found.map { matchRanges[$0] }
+    }
+    
+    private func selectMatch(_ range: NSRange, in tv: NSTextView, wrappedMessage: String?) {
+        (tv as? MangleTextView)?.collapseMultipleSelections()
+        tv.setSelectedRange(range)
+        tv.scrollRangeToVisible(range)
+        tv.showFindIndicator(for: range)
+        if let wrappedMessage { AppDelegate.shared?.showToast(wrappedMessage) }
+        // With the bar closed (⌘G), just move the selection — painting highlights there would
+        // leave them on screen with no bar to dismiss them.
+        guard showFindBar else { return }
+        if matchRanges.isEmpty { highlightMatches() } else { updateCurrentMatch(for: range) }
     }
     
     private func findNext() {
-        guard let tv = textView, !findText.isEmpty else { return }
-        let nsText = tv.string as NSString
-        let currentPos = tv.selectedRange().location + tv.selectedRange().length
-        
-        if useRegex {
-            guard let regex = buildRegex() else { return }
-            let fullLength = nsText.length
-            // Search from cursor to end, then wrap
-            for searchStart in [currentPos, 0] {
-                let searchRange = NSRange(location: searchStart, length: fullLength - searchStart)
-                if let m = regex.firstMatch(in: tv.string, range: searchRange) {
-                    tv.setSelectedRange(m.range)
-                    tv.scrollRangeToVisible(m.range)
-                    return
-                }
+        guard let tv = textView else { return }
+        guard let regex = buildSearchRegex() else {
+            if !showFindBar { showFindBar = true; isFindFieldFocused = true }
+            return
+        }
+        let string = tv.string
+        let length = (string as NSString).length
+        let start = NSMaxRange(tv.selectedRange())
+        func firstMatch(from: Int, to: Int) -> NSRange? {
+            var result: NSRange?
+            regex.enumerateMatches(in: string, options: [.withoutAnchoringBounds], range: NSRange(location: from, length: to - from)) { m, _, stop in
+                if let r = m?.range, r.length > 0 { result = r; stop.pointee = true }
             }
-        } else {
-            let text = nsText
-            var searchRange = NSRange(location: currentPos, length: text.length - currentPos)
-            var range = text.range(of: findText, options: .caseInsensitive, range: searchRange)
-            if range.location == NSNotFound {
-                searchRange = NSRange(location: 0, length: text.length)
-                range = text.range(of: findText, options: .caseInsensitive, range: searchRange)
-            }
-            if range.location != NSNotFound {
-                tv.setSelectedRange(range)
-                tv.scrollRangeToVisible(range)
-            }
+            return result
+        }
+        if let r = firstMatch(from: min(start, length), to: length) {
+            selectMatch(r, in: tv, wrappedMessage: nil)
+        } else if let r = firstMatch(from: 0, to: length) {
+            selectMatch(r, in: tv, wrappedMessage: "Search wrapped to top")
         }
     }
-    
+
     private func findPrevious() {
-        guard let tv = textView, !findText.isEmpty else { return }
-        let nsText = tv.string as NSString
-        let currentPos = tv.selectedRange().location
-        
-        if useRegex {
-            guard let regex = buildRegex() else { return }
-            let fullLength = nsText.length
-            // Collect all matches then find the last one before cursor
-            let allMatches = regex.matches(in: tv.string, range: NSRange(location: 0, length: fullLength))
-            let before = allMatches.filter { $0.range.location < currentPos }
-            let target = before.last ?? allMatches.last
-            if let m = target {
-                tv.setSelectedRange(m.range)
-                tv.scrollRangeToVisible(m.range)
-            }
-        } else {
-            let text = nsText
-            var searchRange = NSRange(location: 0, length: currentPos)
-            var range = text.range(of: findText, options: [.caseInsensitive, .backwards], range: searchRange)
-            if range.location == NSNotFound {
-                searchRange = NSRange(location: 0, length: text.length)
-                range = text.range(of: findText, options: [.caseInsensitive, .backwards], range: searchRange)
-            }
-            if range.location != NSNotFound {
-                tv.setSelectedRange(range)
-                tv.scrollRangeToVisible(range)
-            }
+        guard let tv = textView else { return }
+        guard let regex = buildSearchRegex() else {
+            if !showFindBar { showFindBar = true; isFindFieldFocused = true }
+            return
+        }
+        let string = tv.string
+        let all = regex.matches(in: string, range: NSRange(location: 0, length: (string as NSString).length))
+            .map(\.range).filter { $0.length > 0 }
+        let current = tv.selectedRange().location
+        if let r = all.last(where: { $0.location < current }) {
+            selectMatch(r, in: tv, wrappedMessage: nil)
+        } else if let r = all.last {
+            selectMatch(r, in: tv, wrappedMessage: "Search wrapped to bottom")
         }
     }
     
     private func replaceCurrent() {
-        guard let tv = textView, !findText.isEmpty else { return }
+        guard let tv = textView, let regex = buildSearchRegex() else { return }
+        let string = tv.string
         let selectedRange = tv.selectedRange()
-        let selectedText = (tv.string as NSString).substring(with: selectedRange)
-        
-        if useRegex {
-            guard let regex = buildRegex() else { return }
-            let fullSelected = NSRange(location: 0, length: (selectedText as NSString).length)
-            if regex.firstMatch(in: selectedText, range: fullSelected) != nil {
-                let replaced = regex.stringByReplacingMatches(in: selectedText, range: fullSelected, withTemplate: replaceText)
-                tv.insertText(replaced, replacementRange: selectedRange)
-                highlightMatches()
-            }
-        } else {
-            if selectedText.caseInsensitiveCompare(findText) == .orderedSame {
-                tv.insertText(replaceText, replacementRange: selectedRange)
+        // Replace via shouldChangeText/replaceCharacters rather than insertText: MangleTextView's
+        // insertText applies auto-close, so a one-character replacement like "(" or a quote
+        // used to wrap the match ("(foo)") instead of replacing it.
+        if selectedRange.length > 0,
+           let match = regex.firstMatch(in: string, options: [.withoutAnchoringBounds], range: selectedRange),
+           match.range == selectedRange {
+            let replacement = regex.replacementString(for: match, in: string, offset: 0, template: replacementTemplate)
+            if tv.shouldChangeText(in: selectedRange, replacementString: replacement) {
+                tv.replaceCharacters(in: selectedRange, with: replacement)
+                tv.didChangeText()
+                tv.undoManager?.setActionName("Replace")
+                let end = selectedRange.location + (replacement as NSString).length
+                tv.setSelectedRange(NSRange(location: end, length: 0))
                 highlightMatches()
             }
         }
@@ -944,26 +1061,132 @@ struct EditorView: View {
     }
     
     private func replaceAll() {
-        guard !findText.isEmpty else { return }
-        if useRegex {
-            guard let regex = buildRegex() else { return }
-            transform { text in
-                regex.stringByReplacingMatches(
-                    in: text,
-                    range: NSRange(location: 0, length: (text as NSString).length),
-                    withTemplate: replaceText
-                )
-            }
-        } else {
-            transform { text in
-                text.replacingOccurrences(of: findText, with: replaceText, options: .caseInsensitive)
-            }
+        guard let regex = buildSearchRegex() else { return }
+        let count = matchCount
+        let template = replacementTemplate
+        transform("Replace All", scope: .document) { text in
+            regex.stringByReplacingMatches(in: text, range: NSRange(location: 0, length: (text as NSString).length), withTemplate: template)
         }
+        highlightMatches()
+        if count > 0 { AppDelegate.shared?.showToast("Replaced \(count) match\(count == 1 ? "" : "es")") }
+    }
+    
+    /// ⌘E: search for the selection (or the word at the caret).
+    private func useSelectionForFind() {
+        guard let tv = textView else { return }
+        let ns = tv.string as NSString
+        var sel = tv.selectedRange()
+        if sel.length == 0, let mtv = tv as? MangleTextView { sel = mtv.wordRange(at: sel.location) }
+        guard sel.length > 0 else { return }
+        let text = ns.substring(with: sel)
+        findText = useRegex ? NSRegularExpression.escapedPattern(for: text) : text
+        UserDefaults.standard.set(findText, forKey: Self.lastFindTextKey)
         highlightMatches()
     }
     
+    // MARK: - Smart Select (⌥⇧↑ expand, ⌥⇧↓ shrink)
+
+    private func nearestUnmatchedOpener(before pos: Int, in text: NSString) -> (index: Int, char: Character)? {
+        var depth: [Character: Int] = ["(": 0, "[": 0, "{": 0]
+        let openerFor: [Character: Character] = [")": "(", "]": "[", "}": "{"]
+        var i = pos - 1
+        while i >= 0 {
+            if let scalar = Unicode.Scalar(text.character(at: i)) {
+                let ch = Character(scalar)
+                if let opener = openerFor[ch] {
+                    depth[opener, default: 0] += 1
+                } else if depth[ch] != nil {
+                    if depth[ch]! == 0 { return (i, ch) }
+                    depth[ch]! -= 1
+                }
+            }
+            i -= 1
+        }
+        return nil
+    }
+
+    private func nearestUnmatchedCloser(after pos: Int, matching opener: Character, in text: NSString) -> Int? {
+        let closerFor: [Character: Character] = ["(": ")", "[": "]", "{": "}"]
+        guard let closer = closerFor[opener] else { return nil }
+        var depth = 0
+        var i = pos
+        let len = text.length
+        while i < len {
+            if let scalar = Unicode.Scalar(text.character(at: i)) {
+                let ch = Character(scalar)
+                if ch == opener { depth += 1 }
+                else if ch == closer {
+                    if depth == 0 { return i }
+                    depth -= 1
+                }
+            }
+            i += 1
+        }
+        return nil
+    }
+
+    /// Innermost bracket pair strictly enclosing `range`, searching outward from its edges.
+    private func enclosingBracketRange(for range: NSRange, in text: NSString, includeBrackets: Bool) -> NSRange? {
+        guard let (openIdx, openCh) = nearestUnmatchedOpener(before: range.location, in: text) else { return nil }
+        guard let closeIdx = nearestUnmatchedCloser(after: NSMaxRange(range), matching: openCh, in: text) else { return nil }
+        return includeBrackets
+            ? NSRange(location: openIdx, length: closeIdx - openIdx + 1)
+            : NSRange(location: openIdx + 1, length: closeIdx - openIdx - 1)
+    }
+
+    private func expandSelection(in tv: NSTextView) {
+        let sel = tv.selectedRange()
+        let text = tv.string as NSString
+        var candidate: NSRange? = nil
+
+        if sel.length == 0, let mtv = tv as? MangleTextView {
+            let word = mtv.currentWordRange(at: sel.location)
+            if word.length > 0 { candidate = word }
+        }
+
+        if candidate == nil {
+            if let inner = enclosingBracketRange(for: sel, in: text, includeBrackets: false), inner != sel {
+                candidate = inner
+            } else if let withBrackets = enclosingBracketRange(for: sel, in: text, includeBrackets: true), withBrackets != sel {
+                candidate = withBrackets
+            }
+        }
+
+        if candidate == nil {
+            var ls = 0, ce = 0
+            text.getLineStart(&ls, end: nil, contentsEnd: &ce, for: sel)
+            let lineRange = NSRange(location: ls, length: ce - ls)
+            if lineRange != sel, lineRange.location <= sel.location, NSMaxRange(lineRange) >= NSMaxRange(sel) {
+                candidate = lineRange
+            }
+        }
+
+        if candidate == nil {
+            let full = NSRange(location: 0, length: text.length)
+            if full != sel { candidate = full }
+        }
+
+        guard let result = candidate else { return }
+        // A manual selection change since the last expand starts a fresh chain.
+        if sel != lastExpandResult { selectionHistory.removeAll() }
+        selectionHistory.append(sel)
+        lastExpandResult = result
+        tv.setSelectedRange(result)
+        tv.scrollRangeToVisible(result)
+    }
+
+    private func shrinkSelection(in tv: NSTextView) {
+        guard var previous = selectionHistory.popLast() else { return }
+        let len = (tv.string as NSString).length
+        previous.location = min(previous.location, len)
+        previous.length = min(previous.length, len - previous.location)
+        lastExpandResult = previous
+        tv.setSelectedRange(previous)
+        tv.scrollRangeToVisible(previous)
+    }
+
     // MARK: - Line Operations
-    
+
     private func lineExtents(in tv: NSTextView) -> (lineStart: Int, lineEnd: Int, contentsEnd: Int, colOffset: Int) {
         let text = tv.string as NSString
         let sel = tv.selectedRange()
@@ -1038,44 +1261,253 @@ struct EditorView: View {
     
     private func closeFindBar() {
         showFindBar = false
-        findText = ""
+        // findText and the find options are intentionally kept — they're restored next time Find opens.
         replaceText = ""
         matchCount = 0
-        if let tv = textView, let storage = tv.textStorage {
-            storage.removeAttribute(.backgroundColor, range: NSRange(location: 0, length: storage.length))
+        matchRanges = []
+        currentMatchIndex = nil
+        if let mtv = textView as? MangleTextView {
+            mtv.findRanges = []
+            mtv.currentFindRange = nil
         }
     }
     
-    // MARK: - Format Code
+    // MARK: - Command Palette
     
-    private func formatCode() {
-        let lang = viewModel.currentLanguage
-        
-        // JSON: use native formatter (fast, no JS overhead)
-        if lang == "json" {
-            let text = viewModel.text
-            guard let data = text.data(using: .utf8),
-                  let obj  = try? JSONSerialization.jsonObject(with: data),
-                  let out  = try? JSONSerialization.data(withJSONObject: obj, options: [.prettyPrinted, .withoutEscapingSlashes]),
-                  let formatted = String(data: out, encoding: .utf8), !formatted.isEmpty else {
-                AppDelegate.shared?.showToast("Format failed — check syntax")
-                return
+    private var paletteResults: [EditorCommand] {
+        CommandPaletteResults.filter(allCommands, query: paletteQuery, goToLine: goToLine)
+    }
+    
+    private func openPalette(query: String = "") {
+        paletteQuery = query
+        paletteIndex = 0
+        showPalette = true
+    }
+    
+    private func closePalette() {
+        showPalette = false
+        paletteQuery = ""
+        paletteIndex = 0
+        if let tv = textView { tv.window?.makeFirstResponder(tv) }
+    }
+    
+    private func runPaletteCommand(_ command: EditorCommand) {
+        guard command.isEnabled else { return }
+        closePalette()
+        // Run after focus is back in the text view, so commands act on the editor.
+        DispatchQueue.main.async { command.run() }
+    }
+    
+    // MARK: - Commands
+    
+    private var documentIndentWidth: Int {
+        (textView as? MangleTextView)?.indentWidth ?? max(SettingsManager.shared.tabSize, 1)
+    }
+    
+    private var documentIndentation: Indentation {
+        (textView as? MangleTextView)?.indentation ?? .defaultForSettings
+    }
+    
+    /// Every command available in the palette: editor actions plus all transforms.
+    private var allCommands: [EditorCommand] {
+        let mtv = textView as? MangleTextView
+        var commands: [EditorCommand] = [
+            EditorCommand(title: "Save to Clipboard", section: "File", shortcut: "⌘S", run: onSave),
+            EditorCommand(title: "Save and Paste", section: "File", shortcut: "⌘↩", run: onSaveAndPaste),
+            EditorCommand(title: "Revert to Original", section: "File", isEnabled: viewModel.isDirty, run: revertToOriginal),
+            EditorCommand(title: "Find", section: "Find", shortcut: "⌘F") {
+                showFindBar = true
+                isFindFieldFocused = true
+                highlightMatches()
+            },
+            EditorCommand(title: "Find Next", section: "Find", shortcut: "⌘G", run: findNext),
+            EditorCommand(title: "Find Previous", section: "Find", shortcut: "⇧⌘G", run: findPrevious),
+            EditorCommand(title: "Use Selection for Find", section: "Find", shortcut: "⌘E", run: useSelectionForFind),
+            EditorCommand(title: "Go to Line…", section: "Navigate", shortcut: "⌃G") { openPalette(query: ":") },
+            EditorCommand(title: "Toggle Comment", section: "Edit", shortcut: "⌘/", run: toggleComment),
+            EditorCommand(title: "Select Next Occurrence", section: "Selection", shortcut: "⌘D") { mtv?.selectNextOccurrence() },
+            EditorCommand(title: "Select All Occurrences", section: "Selection", shortcut: "⌃⌘G") { mtv?.selectAllOccurrences() },
+            EditorCommand(title: "Select Line", section: "Selection", shortcut: "⌘L") { if let tv = textView { selectLine(in: tv) } },
+            EditorCommand(title: "Expand Selection", section: "Selection", shortcut: "⌥⇧↑") { if let tv = textView { expandSelection(in: tv) } },
+            EditorCommand(title: "Shrink Selection", section: "Selection", shortcut: "⌥⇧↓") { if let tv = textView { shrinkSelection(in: tv) } },
+            EditorCommand(title: "Duplicate Line", section: "Edit", shortcut: "⇧⌘D") { if let tv = textView { duplicateLine(in: tv) } },
+            EditorCommand(title: "Delete Line", section: "Edit", shortcut: "⇧⌘K") { if let tv = textView { deleteLine(in: tv) } },
+            EditorCommand(title: "Move Line Up", section: "Edit", shortcut: "⌥↑") { if let tv = textView { moveLine(in: tv, up: true) } },
+            EditorCommand(title: "Move Line Down", section: "Edit", shortcut: "⌥↓") { if let tv = textView { moveLine(in: tv, up: false) } },
+            EditorCommand(title: settings.wordWrap ? "Turn Off Word Wrap" : "Turn On Word Wrap", section: "View", shortcut: "⌥Z") { settings.wordWrap.toggle() },
+            EditorCommand(title: "Zoom In", section: "View", shortcut: "⌘=") { settings.fontSize = min(settings.fontSize + 1, 36) },
+            EditorCommand(title: "Zoom Out", section: "View", shortcut: "⌘−") { settings.fontSize = max(settings.fontSize - 1, 9) },
+            EditorCommand(title: "Reset Zoom", section: "View", shortcut: "⌘0") { settings.fontSize = NSFont.systemFontSize },
+            EditorCommand(title: "Indent Using Spaces (2)", section: "Indentation") { setIndentation(.spaces(2)) },
+            EditorCommand(title: "Indent Using Spaces (4)", section: "Indentation") { setIndentation(.spaces(4)) },
+            EditorCommand(title: "Indent Using Tabs", section: "Indentation") { setIndentation(.tabs) },
+        ]
+        commands += Self.languages.map { lang in
+            EditorCommand(title: "Set Language: \(lang.label)", section: "Language") { setLanguage(lang.id) }
+        }
+        commands += transformSections.flatMap(\.commands)
+        return commands
+    }
+    
+    /// Transform menu contents — also exposed in the palette.
+    private var transformSections: [(title: String, commands: [EditorCommand])] {
+        let width = documentIndentWidth
+        let indentation = documentIndentation
+        func t(_ title: String, _ section: String, scope: TransformScope = .selectionOrDocument,
+               shortcut: String? = nil, key: SwiftUI.KeyboardShortcut? = nil,
+               _ operation: @escaping (String) throws -> String) -> EditorCommand {
+            EditorCommand(title: title, section: section, shortcut: shortcut, keyboardShortcut: key) {
+                transform(title, scope: scope, operation)
             }
-            transform { _ in formatted }
-            AppDelegate.shared?.showToast("Formatted")
+        }
+        var sections: [(title: String, commands: [EditorCommand])] = []
+        if PrettierFormatter.shared.canFormat(language: viewModel.currentLanguage) {
+            sections.append(("Format", [
+                EditorCommand(title: "Format Code", section: "Format", shortcut: "⇧⌘F",
+                              keyboardShortcut: .init("f", modifiers: [.command, .shift]), run: formatCode)
+            ]))
+        }
+        sections.append(("Whitespace", [
+            t("Trim Whitespace", "Whitespace", scope: .linesOrDocument, shortcut: "⇧⌘T", key: .init("t", modifiers: [.command, .shift]),
+              TextTransforms.trimTrailingWhitespace),
+            t("Normalize Indentation", "Whitespace", scope: .linesOrDocument, shortcut: "⇧⌘N", key: .init("n", modifiers: [.command, .shift])) {
+                TextTransforms.normalizeIndentation($0, tabSize: width)
+            },
+            t("Remove All Indentation", "Whitespace", scope: .linesOrDocument, TextTransforms.removeAllIndentation),
+            t("Remove Blank Lines", "Whitespace", scope: .linesOrDocument, TextTransforms.removeBlankLines),
+            t("Tabs → Spaces", "Whitespace", scope: .linesOrDocument) { TextTransforms.tabsToSpaces($0, tabSize: width) },
+            t("Spaces → Tabs", "Whitespace", scope: .linesOrDocument) { TextTransforms.spacesToTabs($0, tabSize: width) },
+        ]))
+        sections.append(("Case", [
+            t("lowercase", "Case", shortcut: "⇧⌘L", key: .init("l", modifiers: [.command, .shift])) { $0.lowercased() },
+            t("UPPERCASE", "Case", shortcut: "⇧⌘U", key: .init("u", modifiers: [.command, .shift])) { $0.uppercased() },
+            t("Title Case", "Case", TextTransforms.titleCase),
+            t("camelCase", "Case", TextTransforms.camelCase),
+            t("snake_case", "Case", TextTransforms.snakeCase),
+            t("kebab-case", "Case", TextTransforms.kebabCase),
+            t("CONSTANT_CASE", "Case", TextTransforms.constantCase),
+        ]))
+        sections.append(("Lines", [
+            t("Sort Lines", "Lines", scope: .linesOrDocument, TextTransforms.sortLines),
+            t("Sort Lines (Natural)", "Lines", scope: .linesOrDocument, TextTransforms.sortLinesNatural),
+            t("Remove Duplicate Lines", "Lines", scope: .linesOrDocument, TextTransforms.removeDuplicateLines),
+            t("Reverse Lines", "Lines", scope: .linesOrDocument, TextTransforms.reverseLines),
+            t("Join Lines", "Lines", scope: .currentLines, TextTransforms.joinLines),
+        ]))
+        sections.append(("JSON", [
+            t("Pretty Print JSON", "JSON") { try TextTransforms.prettyPrintJSON($0, indentation: indentation) },
+            t("Minify JSON", "JSON", TextTransforms.minifyJSON),
+            t("Sort JSON Keys", "JSON") { try TextTransforms.sortJSONKeys($0, indentation: indentation) },
+            EditorCommand(title: "Validate JSON", section: "JSON", run: validateJSON),
+            t("Escape as JSON String", "JSON", TextTransforms.escapeJSONString),
+            t("Unescape JSON String", "JSON", TextTransforms.unescapeJSONString),
+            t("Decode JWT", "JSON") { try TextTransforms.decodeJWT($0, indentation: indentation) },
+        ]))
+        sections.append(("Encode / Decode", [
+            t("Base64 Encode", "Encode / Decode", TextTransforms.base64Encode),
+            t("Base64 Decode", "Encode / Decode", TextTransforms.base64Decode),
+            t("URL Encode", "Encode / Decode", TextTransforms.urlEncode),
+            t("URL Decode", "Encode / Decode", TextTransforms.urlDecode),
+            t("HTML Entity Encode", "Encode / Decode", TextTransforms.htmlEntityEncode),
+            t("HTML Entity Decode", "Encode / Decode", TextTransforms.htmlEntityDecode),
+        ]))
+        sections.append(("Line Endings", [
+            t("Convert to LF", "Line Endings", scope: .document, TextTransforms.toLF),
+            t("Convert to CRLF", "Line Endings", scope: .document, TextTransforms.toCRLF),
+            t("Convert to CR", "Line Endings", scope: .document, TextTransforms.toCR),
+        ]))
+        return sections
+    }
+    
+    private func setLanguage(_ id: String) {
+        if id == "auto" {
+            viewModel.currentLanguage = CustomTextEditor.Coordinator.guessLanguage(viewModel.text)
+            viewModel.languageIsManual = false
+        } else {
+            viewModel.currentLanguage = id
+            viewModel.languageIsManual = true
+        }
+    }
+    
+    private func goToLine(_ line: Int) {
+        guard let tv = textView else { return }
+        let ns = tv.string as NSString
+        var location = 0
+        var current = 1
+        while current < line && location < ns.length {
+            location = NSMaxRange(ns.lineRange(for: NSRange(location: location, length: 0)))
+            current += 1
+        }
+        let range = NSRange(location: min(location, ns.length), length: 0)
+        tv.window?.makeFirstResponder(tv)
+        tv.setSelectedRange(range)
+        tv.scrollRangeToVisible(range)
+        tv.showFindIndicator(for: ns.lineRange(for: range))
+    }
+    
+    private func toggleComment() {
+        guard let syntax = CommentSyntax.forLanguage(viewModel.currentLanguage) else {
+            AppDelegate.shared?.showToast("No comment syntax for \(currentLanguageLabel)")
             return
         }
-        
-        // Everything else: Prettier via JavaScriptCore
-        let code    = viewModel.text
-        let tabSize = SettingsManager.shared.tabSize
+        transform("Toggle Comment", scope: .currentLines) { TextTransforms.toggleComment($0, syntax: syntax) }
+    }
+    
+    private func revertToOriginal() {
+        let original = viewModel.baseText
+        transform("Revert to Original", scope: .document) { _ in original }
+    }
+    
+    private func validateJSON() {
+        guard let tv = textView else { return }
+        let sel = tv.selectedRange()
+        let text = sel.length > 0 ? (tv.string as NSString).substring(with: sel) : tv.string
+        AppDelegate.shared?.showToast(TextTransforms.validateJSON(text) ?? "Valid JSON")
+    }
+    
+    private func setIndentation(_ indentation: Indentation) {
+        (textView as? MangleTextView)?.indentation = indentation
+        viewModel.status.indentation = indentation
+    }
+    
+    /// Re-indents the document from its current indentation to `target`, then adopts it.
+    private func convertIndentation(to target: Indentation) {
+        let from = documentIndentation
+        let tabSize = documentIndentWidth
+        transform("Convert Indentation", scope: .document) {
+            TextTransforms.reindent($0, from: from, to: target, tabSize: tabSize)
+        }
+        setIndentation(target)
+    }
+    
+    private func convertLineEndings(to ending: LineEnding) {
+        switch ending {
+        case .lf: transform("Convert to LF", scope: .document, TextTransforms.toLF)
+        case .crlf: transform("Convert to CRLF", scope: .document, TextTransforms.toCRLF)
+        case .cr: transform("Convert to CR", scope: .document, TextTransforms.toCR)
+        case .mixed: break
+        }
+    }
+
+    // MARK: - Format Code
+
+    private func formatCode() {
+        let lang = viewModel.currentLanguage
+        let code = viewModel.text
+        let tabSize = documentIndentWidth
         
         Task {
             do {
                 let formatted = try await PrettierFormatter.shared.format(
                     code: code, language: lang, tabSize: tabSize)
                 await MainActor.run {
-                    transform { _ in formatted }
+                    // Formatting is async; if the user kept typing meanwhile, applying the result
+                    // would silently discard those edits.
+                    guard viewModel.text == code else {
+                        AppDelegate.shared?.showToast("Text changed while formatting — try again")
+                        return
+                    }
+                    transform("Format Code", scope: .document) { _ in formatted }
                     AppDelegate.shared?.showToast("Formatted")
                 }
             } catch PrettierError.syntaxError {
@@ -1090,45 +1522,149 @@ struct EditorView: View {
         }
     }
     
-    private func transform(_ operation: (String) -> String) {
-        guard let textView = textView else {
-            viewModel.text = operation(viewModel.text)
+    // MARK: - Transform
+    
+    enum TransformScope {
+        /// Always the whole document.
+        case document
+        /// The selection if there is one, otherwise the whole document.
+        case selectionOrDocument
+        /// The full lines touched by the selection, otherwise the whole document.
+        case linesOrDocument
+        /// The full lines touched by the selection, or the caret's line.
+        case currentLines
+    }
+    
+    /// Applies `operation` to the scoped text as a single native, named undo step.
+    private func transform(_ title: String, scope: TransformScope = .selectionOrDocument, _ operation: (String) throws -> String) {
+        guard let tv = textView else { return }
+        (tv as? MangleTextView)?.collapseMultipleSelections()
+        let ns = tv.string as NSString
+        let sel = tv.selectedRange()
+        let hasSelection = sel.length > 0
+        let full = NSRange(location: 0, length: ns.length)
+        let range: NSRange
+        switch scope {
+        case .document: range = full
+        case .selectionOrDocument: range = hasSelection ? sel : full
+        case .linesOrDocument: range = hasSelection ? fullLines(of: sel, in: ns) : full
+        case .currentLines: range = fullLines(of: sel, in: ns)
+        }
+        let original = ns.substring(with: range)
+        let result: String
+        do {
+            result = try operation(original)
+        } catch let error as TransformError {
+            AppDelegate.shared?.showToast(error.message)
+            return
+        } catch {
+            AppDelegate.shared?.showToast("\(title) failed")
             return
         }
-        let oldText = textView.string
-        let newText = operation(oldText)
-        let savedRange = textView.selectedRange()
-        // Clamp saved range to new text length in case text got shorter
-        let clampedLocation = min(savedRange.location, (newText as NSString).length)
-        let clampedLength = min(savedRange.length, (newText as NSString).length - clampedLocation)
-        let restoredRange = NSRange(location: clampedLocation, length: clampedLength)
+        guard result != original, tv.shouldChangeText(in: range, replacementString: result) else { return }
+        tv.replaceCharacters(in: range, with: result)
+        tv.didChangeText()
+        tv.undoManager?.setActionName(title)
         
-        guard let undoManager = textView.undoManager else {
-            textView.allowsUndo = false
-            textView.string = newText
-            viewModel.text = newText
-            textView.allowsUndo = true
-            textView.setSelectedRange(restoredRange)
-            return
+        let newLength = (result as NSString).length
+        // Keep the result selected when the user had selected it (including ⌘A); only
+        // document-wide commands run with a partial selection (Format, Replace All) drop it.
+        if hasSelection && (range != full || sel.length == ns.length) {
+            tv.setSelectedRange(NSRange(location: range.location, length: newLength))
+        } else if range == full {
+            tv.setSelectedRange(NSRange(location: min(sel.location, newLength), length: 0))
+        } else {
+            // Caret-line transform: keep the caret where it was, shifted by the edit.
+            let shifted = sel.location + newLength - range.length
+            tv.setSelectedRange(NSRange(location: min(max(range.location, shifted), range.location + newLength), length: 0))
         }
-        let vm = viewModel
-        func apply(tv: NSTextView, to text: String, undoing revert: String, restoring range: NSRange) {
-            tv.allowsUndo = false
-            tv.string = text
-            vm.text = text
-            tv.setSelectedRange(range)
-            tv.allowsUndo = true
-            undoManager.registerUndo(withTarget: tv) { innerTv in
-                apply(tv: innerTv, to: revert, undoing: text, restoring: savedRange)
-            }
-        }
-        apply(tv: textView, to: newText, undoing: oldText, restoring: restoredRange)
+    }
+    
+    /// The full lines covered by `sel` (without the final line break). A selection that
+    /// ends at the very start of a line doesn't include that line.
+    private func fullLines(of sel: NSRange, in ns: NSString) -> NSRange {
+        var adjusted = sel
+        if sel.length > 0, ns.character(at: NSMaxRange(sel) - 1) == 10 { adjusted.length -= 1 }
+        var lineStart = 0, contentsEnd = 0
+        ns.getLineStart(&lineStart, end: nil, contentsEnd: &contentsEnd, for: adjusted)
+        return NSRange(location: lineStart, length: contentsEnd - lineStart)
     }
 }
 
 /// MARK: - NSTextView subclass with VS Code word movement
 
 final class MangleTextView: NSTextView {
+    
+    // MARK: Transient highlights (find matches, matching bracket)
+    //
+    // Drawn as layout-manager temporary attributes: cheap to add/remove, no layout
+    // invalidation, no undo/edit notifications, and they survive Highlightr re-coloring
+    // a line (which replaces all text-storage attributes in that range).
+    
+    var findRanges: [NSRange] = [] { didSet { refreshTransientHighlights() } }
+    /// The match Find last moved to — drawn stronger than the other matches.
+    var currentFindRange: NSRange? { didSet { if currentFindRange != oldValue { refreshTransientHighlights() } } }
+    var bracketRanges: [NSRange] = [] { didSet { refreshTransientHighlights() } }
+    
+    /// This document's indentation (detected on load, changeable from the status bar).
+    var indentation: Indentation = .spaces(4) { didSet { if indentation != oldValue { needsDisplay = true } } }
+    var indentWidth: Int {
+        if case .spaces(let n) = indentation { return max(n, 1) }
+        return max(SettingsManager.shared.tabSize, 1)
+    }
+    /// Quote pairing is off for prose (plain text / Markdown), where it mostly gets in the way.
+    var autoCloseQuotes = true
+    
+    private var isDark: Bool { effectiveAppearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua }
+    
+    private func refreshTransientHighlights() {
+        guard let lm = layoutManager else { return }
+        let len = (textStorage?.length ?? 0)
+        lm.removeTemporaryAttribute(.backgroundColor, forCharacterRange: NSRange(location: 0, length: len))
+        let isDark = self.isDark
+        let findColor = AppTheme.teal.withAlphaComponent(0.28)
+        for r in findRanges where NSMaxRange(r) <= len {
+            lm.addTemporaryAttribute(.backgroundColor, value: findColor, forCharacterRange: r)
+        }
+        if let current = currentFindRange, NSMaxRange(current) <= len {
+            lm.addTemporaryAttribute(.backgroundColor, value: AppTheme.teal.withAlphaComponent(isDark ? 0.7 : 0.55), forCharacterRange: current)
+        }
+        let bracketColor = isDark
+            ? NSColor(red: 0.3, green: 0.6, blue: 0.6, alpha: 0.45)
+            : NSColor(red: 0.2, green: 0.7, blue: 0.7, alpha: 0.3)
+        for r in bracketRanges where NSMaxRange(r) <= len {
+            lm.addTemporaryAttribute(.backgroundColor, value: bracketColor, forCharacterRange: r)
+        }
+    }
+    
+    // MARK: Line numbers
+    //
+    // Line number lookups (caret position, gutter's first visible line) count newlines
+    // relative to the last lookup instead of from the top of the document each time.
+    
+    private var lineAnchor = (location: 0, line: 1)
+    
+    func lineNumber(at location: Int) -> Int {
+        let text = string as NSString
+        let target = min(max(location, 0), text.length)
+        if lineAnchor.location > text.length { lineAnchor = (0, 1) }
+        let line: Int
+        if target >= lineAnchor.location {
+            line = lineAnchor.line + text.countNewlines(in: NSRange(location: lineAnchor.location, length: target - lineAnchor.location))
+        } else if target < lineAnchor.location - target {
+            line = 1 + text.countNewlines(in: NSRange(location: 0, length: target))
+        } else {
+            line = lineAnchor.line - text.countNewlines(in: NSRange(location: target, length: lineAnchor.location - target))
+        }
+        lineAnchor = (target, line)
+        return line
+    }
+    
+    /// Called for every character edit. Edits at/after the anchor don't change the
+    /// number of newlines before it, so the anchor stays valid.
+    func noteCharactersEdited(at location: Int) {
+        if location < lineAnchor.location { lineAnchor = (0, 1) }
+    }
     
     // MARK: Key interception (most reliable — fires before interpretKeyEvents)
     
@@ -1155,9 +1691,438 @@ final class MangleTextView: NSTextView {
         }
         super.keyDown(with: event)
     }
+
+    // MARK: Multiple selections & carets
+    //
+    // ⌘D adds the next occurrence as an extra selection (NSTextView supports multiple
+    // non-empty selections natively). Typing over them leaves several insertion points,
+    // which NSTextView can't represent, so we keep the extra carets ourselves: the primary
+    // caret is NSTextView's own selection and the rest live in `extraCarets`. Typing,
+    // Delete and Return apply at every caret; any other command or click collapses back
+    // to the primary caret.
     
+    private(set) var extraCarets: [Int] = []
+    private var isUpdatingMultiSelection = false
+    private var lastAddedOccurrence: NSRange?
+    
+    var hasMultipleSelections: Bool { !extraCarets.isEmpty || selectedRanges.count > 1 }
+    
+    private func multiEditRanges() -> [NSRange] {
+        if !extraCarets.isEmpty {
+            return (extraCarets + [selectedRange().location]).sorted().map { NSRange(location: $0, length: 0) }
+        }
+        return selectedRanges.map(\.rangeValue).sorted { $0.location < $1.location }
+    }
+    
+    /// Applies non-overlapping edits (sorted by location) as one undoable change, then
+    /// places a caret after each replacement.
+    private func applyMultiEdit(_ edits: [(range: NSRange, text: String)]) {
+        guard let storage = textStorage, !edits.isEmpty else { return }
+        let ranges = edits.map { NSValue(range: $0.range) }
+        guard shouldChangeText(inRanges: ranges, replacementStrings: edits.map(\.text)) else { return }
+        storage.beginEditing()
+        for edit in edits.reversed() { storage.replaceCharacters(in: edit.range, with: edit.text) }
+        storage.endEditing()
+        didChangeText()
+        var offset = 0
+        var carets: [Int] = []
+        for edit in edits {
+            let length = (edit.text as NSString).length
+            carets.append(edit.range.location + offset + length)
+            offset += length - edit.range.length
+        }
+        setCarets(carets)
+    }
+    
+    private func setCarets(_ carets: [Int]) {
+        let unique = Array(Set(carets)).sorted()
+        guard let primary = unique.last else { return }
+        isUpdatingMultiSelection = true
+        setSelectedRange(NSRange(location: primary, length: 0))
+        isUpdatingMultiSelection = false
+        extraCarets = Array(unique.dropLast())
+        needsDisplay = true
+    }
+    
+    /// Drops extra selections/carets, keeping the primary one.
+    func collapseMultipleSelections() {
+        guard hasMultipleSelections else { return }
+        let primary = selectedRanges.last?.rangeValue ?? selectedRange()
+        extraCarets = []
+        setSelectedRange(primary)
+        needsDisplay = true
+    }
+    
+    override func setSelectedRanges(_ ranges: [NSValue], affinity: NSSelectionAffinity, stillSelecting: Bool) {
+        let oldLineRect = currentLineRect()
+        super.setSelectedRanges(ranges, affinity: affinity, stillSelecting: stillSelecting)
+        if !isUpdatingMultiSelection && !extraCarets.isEmpty {
+            extraCarets = []
+            needsDisplay = true
+        }
+        // Repaint just the old and new current-line bands.
+        if let oldLineRect { setNeedsDisplay(oldLineRect) }
+        if let newLineRect = currentLineRect(), newLineRect != oldLineRect { setNeedsDisplay(newLineRect) }
+    }
+    
+    override func doCommand(by selector: Selector) {
+        let multiAware: Set<Selector> = [
+            #selector(deleteBackward(_:)), #selector(insertNewline(_:)), #selector(insertNewlineIgnoringFieldEditor(_:))
+        ]
+        if !extraCarets.isEmpty && !multiAware.contains(selector) {
+            collapseMultipleSelections()
+        }
+        super.doCommand(by: selector)
+    }
+    
+    /// ⌘D: select the word at the caret, or add the next occurrence of the selection.
+    func selectNextOccurrence() {
+        let text = string as NSString
+        var ranges = selectedRanges.map(\.rangeValue)
+        extraCarets = []
+        if ranges.count == 1, ranges[0].length == 0 {
+            let word = currentWordRange(at: ranges[0].location)
+            guard word.length > 0 else { return }
+            setSelectedRange(word)
+            lastAddedOccurrence = word
+            return
+        }
+        let anchor = lastAddedOccurrence.flatMap { ranges.contains($0) ? $0 : nil } ?? ranges.last!
+        let needle = text.substring(with: anchor)
+        guard !needle.isEmpty else { return }
+        let all = occurrences(of: needle, in: text)
+        let isFree: (NSRange) -> Bool = { r in !ranges.contains { NSIntersectionRange($0, r).length > 0 } }
+        guard let next = all.first(where: { $0.location >= NSMaxRange(anchor) && isFree($0) })
+                ?? all.first(where: isFree) else {
+            NSSound.beep()
+            return
+        }
+        ranges.append(next)
+        ranges.sort { $0.location < $1.location }
+        isUpdatingMultiSelection = true
+        setSelectedRanges(ranges.map { NSValue(range: $0) }, affinity: .downstream, stillSelecting: false)
+        isUpdatingMultiSelection = false
+        lastAddedOccurrence = next
+        scrollRangeToVisible(next)
+    }
+    
+    /// Selects every occurrence of the selection (or of the word at the caret).
+    func selectAllOccurrences() {
+        let text = string as NSString
+        var sel = selectedRange()
+        if sel.length == 0 { sel = currentWordRange(at: sel.location) }
+        guard sel.length > 0 else { return }
+        let all = occurrences(of: text.substring(with: sel), in: text)
+        guard !all.isEmpty else { return }
+        extraCarets = []
+        isUpdatingMultiSelection = true
+        setSelectedRanges(all.map { NSValue(range: $0) }, affinity: .downstream, stillSelecting: false)
+        isUpdatingMultiSelection = false
+        lastAddedOccurrence = nil
+    }
+    
+    private func occurrences(of needle: String, in text: NSString) -> [NSRange] {
+        var result: [NSRange] = []
+        var search = NSRange(location: 0, length: text.length)
+        while search.length > 0 {
+            let found = text.range(of: needle, options: .literal, range: search)
+            if found.location == NSNotFound { break }
+            result.append(found)
+            let next = NSMaxRange(found)
+            search = NSRange(location: next, length: text.length - next)
+        }
+        return result
+    }
+    
+    /// Rect of an insertion point at `location`, in view coordinates.
+    private func caretRect(at location: Int) -> NSRect? {
+        guard let lm = layoutManager, let tc = textContainer, let storage = textStorage else { return nil }
+        let len = storage.length
+        let origin = textContainerOrigin
+        let endsWithNewline = len > 0 && (storage.string as NSString).character(at: len - 1) == 10
+        if location >= len && (len == 0 || endsWithNewline) {
+            let extra = lm.extraLineFragmentRect
+            guard extra != .zero else { return nil }
+            return NSRect(x: extra.minX + origin.x + tc.lineFragmentPadding, y: extra.minY + origin.y, width: 2, height: extra.height)
+        }
+        let charIndex = min(location, len - 1)
+        let glyph = lm.glyphIndexForCharacter(at: charIndex)
+        guard glyph < lm.numberOfGlyphs else { return nil }
+        let fragment = lm.lineFragmentRect(forGlyphAt: glyph, effectiveRange: nil)
+        var x = lm.location(forGlyphAt: glyph).x
+        if location >= len {
+            x += lm.boundingRect(forGlyphRange: NSRange(location: glyph, length: 1), in: tc).width
+        }
+        return NSRect(x: fragment.minX + x + origin.x, y: fragment.minY + origin.y, width: 2, height: fragment.height)
+    }
+    
+    // MARK: Current line highlight
+    
+    private func currentLineRect() -> NSRect? {
+        guard layoutManager != nil, !hasMultipleSelections, selectedRange().length == 0,
+              let caret = caretRect(at: selectedRange().location) else { return nil }
+        return NSRect(x: 0, y: caret.minY, width: bounds.width, height: caret.height)
+    }
+    
+    override func drawBackground(in rect: NSRect) {
+        super.drawBackground(in: rect)
+        if let line = currentLineRect(), line.intersects(rect) {
+            (isDark ? NSColor.white.withAlphaComponent(0.045) : NSColor.black.withAlphaComponent(0.045)).setFill()
+            line.intersection(rect).fill(using: .sourceOver)
+        }
+    }
+
+    // MARK: Auto-indent
+
+    override func insertNewline(_ sender: Any?) {
+        if hasMultipleSelections {
+            applyMultiEdit(multiEditRanges().map { ($0, "\n") })
+            return
+        }
+        let text = string as NSString
+        let sel = selectedRange()
+
+        var lineStart = 0, contentsEnd = 0
+        text.getLineStart(&lineStart, end: nil, contentsEnd: &contentsEnd, for: NSRange(location: sel.location, length: 0))
+        let currentLine = text.substring(with: NSRange(location: lineStart, length: contentsEnd - lineStart))
+        let leadingWhitespace = String(currentLine.prefix(while: { $0 == " " || $0 == "\t" }))
+
+        let beforeCursor = text.substring(with: NSRange(location: lineStart, length: sel.location - lineStart))
+        let charBefore = beforeCursor.trimmingCharacters(in: .whitespaces).last
+
+        let afterIndex = NSMaxRange(sel)
+        let charAfter: Character? = {
+            guard afterIndex < text.length, let scalar = Unicode.Scalar(text.character(at: afterIndex)) else { return nil }
+            return Character(scalar)
+        }()
+
+        let opens: Set<Character> = ["{", "[", "("]
+        let matchingOpen: [Character: Character] = ["}": "{", "]": "[", ")": "("]
+
+        let opensBlock = charBefore.map(opens.contains) ?? false
+        let tabSpaces = indentation.unit
+
+        let insertion: String
+        let cursorOffset: Int
+
+        if opensBlock, let afterCh = charAfter, matchingOpen[afterCh] == charBefore {
+            // Cursor sits between a fresh opener and its matching closer (e.g. "{|}") —
+            // expand into an indented block instead of just carrying the indent over.
+            let innerIndent = leadingWhitespace + tabSpaces
+            insertion = "\n" + innerIndent + "\n" + leadingWhitespace
+            cursorOffset = 1 + innerIndent.utf16.count
+        } else {
+            let newIndent = opensBlock ? leadingWhitespace + tabSpaces : leadingWhitespace
+            insertion = "\n" + newIndent
+            cursorOffset = insertion.utf16.count
+        }
+
+        guard shouldChangeText(in: sel, replacementString: insertion) else { return }
+        replaceCharacters(in: sel, with: insertion)
+        didChangeText()
+        setSelectedRange(NSRange(location: sel.location + cursorOffset, length: 0))
+    }
+
+    // MARK: Auto-closing brackets & quotes
+
+    private static let autoCloseOpeners: [unichar: unichar] = [
+        40: 41,   // ( )
+        91: 93,   // [ ]
+        123: 125, // { }
+        34: 34,   // " "
+        39: 39    // ' '
+    ]
+    private static let autoCloseClosersOnly: Set<unichar> = [41, 93, 125] // ) ] }
+    private static let autoCloseQuoteChars: Set<unichar> = [34, 39]       // " '
+
+    override func insertText(_ insertString: Any, replacementRange: NSRange) {
+        if hasMultipleSelections, !hasMarkedText(), replacementRange.location == NSNotFound {
+            let typed = (insertString as? String) ?? (insertString as? NSAttributedString)?.string ?? ""
+            applyMultiEdit(multiEditRanges().map { ($0, typed) })
+            return
+        }
+        guard let str = insertString as? String, str.utf16.count == 1, let ch = str.utf16.first else {
+            super.insertText(insertString, replacementRange: replacementRange)
+            return
+        }
+
+        let sel = replacementRange.location != NSNotFound ? replacementRange : selectedRange()
+        let text = string as NSString
+        let isQuote = Self.autoCloseQuoteChars.contains(ch)
+
+        // Type-over: typing a closing bracket/quote that's already right there just moves past it.
+        if (Self.autoCloseClosersOnly.contains(ch) || (isQuote && autoCloseQuotes)),
+           sel.length == 0, sel.location < text.length,
+           text.character(at: sel.location) == ch {
+            setSelectedRange(NSRange(location: sel.location + 1, length: 0))
+            return
+        }
+
+        guard let closer = Self.autoCloseOpeners[ch], !isQuote || autoCloseQuotes else {
+            super.insertText(insertString, replacementRange: replacementRange)
+            return
+        }
+
+        // Wrap the current selection in the pair, keeping the wrapped text selected.
+        if sel.length > 0 {
+            let selected = text.substring(with: sel)
+            let replacement = str + selected + String(UnicodeScalar(closer)!)
+            guard shouldChangeText(in: sel, replacementString: replacement) else { return }
+            replaceCharacters(in: sel, with: replacement)
+            didChangeText()
+            setSelectedRange(NSRange(location: sel.location + 1, length: (selected as NSString).length))
+            return
+        }
+
+        // Only pair when the caret is before whitespace, a closer, punctuation or the end —
+        // typing "(" right before "foo" shouldn't produce "()foo".
+        if sel.location < text.length {
+            let next = text.character(at: sel.location)
+            let pairsBefore: Set<unichar> = [41, 93, 125, 44, 59, 58]   // ) ] } , ; :
+            if !(wcIsSpace(next) || pairsBefore.contains(next)) {
+                super.insertText(insertString, replacementRange: replacementRange)
+                return
+            }
+        }
+        if isQuote, sel.location > 0 {
+            let previous = text.character(at: sel.location - 1)
+            // Not after a word character (the apostrophe in "don't"), and not when completing
+            // a triple quote (""" would otherwise become """").
+            let completesTriple = sel.location > 1 && previous == ch && text.character(at: sel.location - 2) == ch
+            if wcIsWord(previous) || completesTriple {
+                super.insertText(insertString, replacementRange: replacementRange)
+                return
+            }
+        }
+
+        let insertion = str + String(UnicodeScalar(closer)!)
+        guard shouldChangeText(in: sel, replacementString: insertion) else { return }
+        replaceCharacters(in: sel, with: insertion)
+        didChangeText()
+        setSelectedRange(NSRange(location: sel.location + 1, length: 0))
+    }
+
+    override func deleteBackward(_ sender: Any?) {
+        if hasMultipleSelections {
+            let edits = multiEditRanges().compactMap { range -> (NSRange, String)? in
+                if range.length > 0 { return (range, "") }
+                guard range.location > 0 else { return (range, "") }
+                let text = string as NSString
+                let composed = text.rangeOfComposedCharacterSequence(at: range.location - 1)
+                return (composed, "")
+            }
+            // Adjacent carets can produce overlapping deletions; keep the first of each overlap.
+            var nonOverlapping: [(NSRange, String)] = []
+            for edit in edits where nonOverlapping.last.map({ NSMaxRange($0.0) <= edit.0.location }) ?? true {
+                nonOverlapping.append(edit)
+            }
+            applyMultiEdit(nonOverlapping.map { (range: $0.0, text: $0.1) })
+            return
+        }
+        let sel = selectedRange()
+        if sel.length == 0, sel.location > 0, sel.location < (string as NSString).length {
+            let text = string as NSString
+            let before = text.character(at: sel.location - 1)
+            let after = text.character(at: sel.location)
+            if Self.autoCloseOpeners[before] == after {
+                let range = NSRange(location: sel.location - 1, length: 2)
+                if shouldChangeText(in: range, replacementString: "") {
+                    replaceCharacters(in: range, with: "")
+                    didChangeText()
+                    return
+                }
+            }
+        }
+        super.deleteBackward(sender)
+    }
+
+    // MARK: Indent Guides
+
+    override func draw(_ dirtyRect: NSRect) {
+        super.draw(dirtyRect)
+        drawIndentGuides(in: dirtyRect)
+        if !extraCarets.isEmpty {
+            insertionPointColor.setFill()
+            for location in extraCarets {
+                if let rect = caretRect(at: location), rect.intersects(dirtyRect) { rect.fill() }
+            }
+        }
+    }
+    
+    override func viewDidChangeEffectiveAppearance() {
+        super.viewDidChangeEffectiveAppearance()
+        refreshTransientHighlights()
+    }
+
+    private func drawIndentGuides(in dirtyRect: NSRect) {
+        guard let layoutManager = layoutManager, let container = textContainer else { return }
+        let text = string as NSString
+        let len = text.length
+        guard len > 0 else { return }
+
+        let tabSize = indentWidth
+        let font = self.font ?? NSFont.monospacedSystemFont(ofSize: NSFont.systemFontSize, weight: .regular)
+        let charWidth = (" " as NSString).size(withAttributes: [.font: font]).width
+        guard charWidth > 0 else { return }
+
+        let guideColor = isDark ? NSColor.white.withAlphaComponent(0.06) : NSColor.black.withAlphaComponent(0.07)
+
+        // Only walk the dirty (visible) glyph range — same reasoning as the line-number
+        // gutter fix: per-line layout lookups across the whole document don't scale.
+        // dirtyRect is in view coordinates; the layout manager wants container coordinates.
+        let containerRect = dirtyRect.offsetBy(dx: -textContainerOrigin.x, dy: -textContainerOrigin.y)
+        let glyphRange = layoutManager.glyphRange(forBoundingRect: containerRect, in: container)
+        let charRange = layoutManager.characterRange(forGlyphRange: glyphRange, actualGlyphRange: nil)
+        let visibleEnd = min(charRange.location + charRange.length, len)
+
+        var lineStart = 0
+        text.getLineStart(&lineStart, end: nil, contentsEnd: nil, for: NSRange(location: charRange.location, length: 0))
+
+        let insetX = textContainerInset.width
+        let insetY = textContainerInset.height
+
+        let path = NSBezierPath()
+        path.lineWidth = 1
+
+        var charIdx = lineStart
+        while charIdx < len {
+            var ls = 0, le = 0, ce = 0
+            text.getLineStart(&ls, end: &le, contentsEnd: &ce, for: NSRange(location: charIdx, length: 0))
+            let lineText = text.substring(with: NSRange(location: ls, length: ce - ls))
+
+            if !lineText.trimmingCharacters(in: .whitespaces).isEmpty {
+                var columns = 0
+                for ch in lineText {
+                    if ch == " " { columns += 1 }
+                    else if ch == "\t" { columns += tabSize }
+                    else { break }
+                }
+                let levels = columns / tabSize
+                if levels > 0 {
+                    let glyphIdx = layoutManager.glyphIndexForCharacter(at: ls)
+                    if glyphIdx < layoutManager.numberOfGlyphs {
+                        let fragRect = layoutManager.lineFragmentRect(forGlyphAt: glyphIdx, effectiveRange: nil)
+                        let top = fragRect.origin.y + insetY
+                        let bottom = top + fragRect.height
+                        for level in 0..<levels {
+                            let x = insetX + CGFloat(level * tabSize) * charWidth
+                            path.move(to: NSPoint(x: x, y: top))
+                            path.line(to: NSPoint(x: x, y: bottom))
+                        }
+                    }
+                }
+            }
+
+            charIdx = le
+            if charIdx > visibleEnd { break }
+        }
+
+        guideColor.setStroke()
+        path.stroke()
+    }
+
     // MARK: Overrides
-    
+
     override func moveWordForward(_ sender: Any?) {
         let sel = selectedRange()
         setSelectedRange(NSRange(location: vscodeWordEnd(from: sel.location + sel.length), length: 0))
@@ -1229,18 +2194,45 @@ final class MangleTextView: NSTextView {
         }
         return i
     }
+
+    func wordRange(at pos: Int) -> NSRange { currentWordRange(at: pos) }
+    
+    /// The word touching `pos` (checking the char at and just before the caret), or a
+    /// zero-length range at `pos` if neither side is a word character. Used by smart-select.
+    fileprivate func currentWordRange(at pos: Int) -> NSRange {
+        let s = string as NSString
+        let n = s.length
+        func isWordAt(_ idx: Int) -> Bool { idx >= 0 && idx < n && wcIsWord(s.character(at: idx)) }
+
+        let anchor: Int
+        if isWordAt(pos) { anchor = pos }
+        else if isWordAt(pos - 1) { anchor = pos - 1 }
+        else { return NSRange(location: pos, length: 0) }
+
+        var start = anchor, end = anchor + 1
+        while start > 0 && isWordAt(start - 1) { start -= 1 }
+        while end < n && isWordAt(end) { end += 1 }
+        return NSRange(location: start, length: end - start)
+    }
 }
 
 // MARK: - Custom Text Editor
 
 struct CustomTextEditor: NSViewRepresentable {
-    @Binding var text: String
-    @Binding var language: String
+    /// Text to push into the editor when `loadGeneration` changes. While editing, the text
+    /// view itself is the source of truth — keystrokes don't round-trip through SwiftUI.
+    var text: String
+    var loadGeneration: Int
+    var language: String
     var fontSize: CGFloat
+    var editorFont: EditorFont
     var wordWrap: Bool
-    var manualLanguage: Bool
+    var isDark: Bool
+    var themeName: String
+    var status: EditorStatus
     var onTextViewReady: ((NSTextView) -> Void)?
-    var onCursorChange: ((Int, Int) -> Void)?
+    /// Called (debounced) after the text changes.
+    var onTextChange: (() -> Void)?
     
     func makeNSView(context: Context) -> NSView {
         guard let highlightr = Highlightr() else {
@@ -1248,19 +2240,27 @@ struct CustomTextEditor: NSViewRepresentable {
             let tv = NSTextView()
             tv.isEditable = true
             tv.allowsUndo = true
+            tv.string = text
             let sv = NSScrollView()
             sv.documentView = tv
             sv.hasVerticalScroller = true
             return sv
         }
-        let isDark = NSApp.effectiveAppearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
-        highlightr.setTheme(to: isDark ? "atom-one-dark" : "xcode")
-        highlightr.theme.setCodeFont(.monospacedSystemFont(ofSize: fontSize, weight: .regular))
+        let coordinator = context.coordinator
+        let theme = themeName
+        highlightr.setTheme(to: theme)
+        highlightr.theme.setCodeFont(editorFont.nsFont(size: fontSize))
+        coordinator.lastAppliedTheme = theme
+        coordinator.currentEditorFont = editorFont
+        coordinator.highlightr = highlightr
         
         let textStorage = CodeAttributedString(highlightr: highlightr)
-        textStorage.language = "plaintext"
+        textStorage.language = nil
+        textStorage.highlightDelegate = coordinator
         
         let layoutManager = NSLayoutManager()
+        // Lay out only what's on screen instead of the whole document up to the viewport.
+        layoutManager.allowsNonContiguousLayout = true
         textStorage.addLayoutManager(layoutManager)
         
         let textContainer = NSTextContainer(size: NSSize(width: 0, height: CGFloat.greatestFiniteMagnitude))
@@ -1276,18 +2276,12 @@ struct CustomTextEditor: NSViewRepresentable {
         textView.isHorizontallyResizable = false
         textView.autoresizingMask = [.width]
         textView.maxSize = NSSize(width: CGFloat.greatestFiniteMagnitude, height: CGFloat.greatestFiniteMagnitude)
-        textView.delegate = context.coordinator
+        textView.delegate = coordinator
         textView.isAutomaticQuoteSubstitutionEnabled = false
         textView.isAutomaticDashSubstitutionEnabled = false
         textView.isAutomaticTextReplacementEnabled = false
         textView.isRichText = true
-        
-        if isDark {
-            textView.backgroundColor = highlightr.theme.themeBackgroundColor ?? AppTheme.editorDarkBG
-        }
-        textView.insertionPointColor = isDark ? AppTheme.teal : NSColor(AppTheme.tealSUI)
-        
-        textStorage.replaceCharacters(in: NSRange(location: 0, length: 0), with: text)
+        coordinator.applyThemeColors(to: textView, isDark: isDark)
         
         let scrollView = NSScrollView()
         scrollView.documentView = textView
@@ -1306,84 +2300,78 @@ struct CustomTextEditor: NSViewRepresentable {
         scrollView.hasVerticalRuler = true
         scrollView.rulersVisible = true
         
-        context.coordinator.rulerView = rulerView
-        context.coordinator.scrollView = scrollView
-        context.coordinator.highlightr = highlightr
-        context.coordinator.codeStorage = textStorage
+        coordinator.rulerView = rulerView
+        coordinator.scrollView = scrollView
+        coordinator.textView = textView
+        coordinator.codeStorage = textStorage
         
         NotificationCenter.default.addObserver(
-            context.coordinator, selector: #selector(Coordinator.gutterNeedsRedraw),
-            name: NSTextStorage.didProcessEditingNotification, object: textView.textStorage
+            coordinator, selector: #selector(Coordinator.codeStorageDidProcessEditing(_:)),
+            name: NSTextStorage.didProcessEditingNotification, object: textStorage
         )
         NotificationCenter.default.addObserver(
-            context.coordinator, selector: #selector(Coordinator.gutterNeedsRedraw),
+            coordinator, selector: #selector(Coordinator.gutterNeedsRedraw),
             name: NSView.boundsDidChangeNotification, object: scrollView.contentView
         )
         
-        let coordinator = context.coordinator
+        coordinator.applyLoadedText(text, language: language, generation: loadGeneration, to: textView)
+        
         DispatchQueue.main.async {
             onTextViewReady?(textView)
-            coordinator.detectAndApplyLanguage(for: text)
         }
         return scrollView
     }
     
     func updateNSView(_ nsView: NSView, context: Context) {
-        context.coordinator.parent = self
-        context.coordinator.isApplyingProgrammaticChange = true
-        defer { context.coordinator.isApplyingProgrammaticChange = false }
+        let coordinator = context.coordinator
+        coordinator.parent = self
         
         guard let scrollView = nsView as? NSScrollView,
-              let textView = scrollView.documentView as? NSTextView else { return }
+              let textView = scrollView.documentView as? MangleTextView else { return }
         
-        if textView.string != text {
-            let storage = textView.textStorage
-            storage?.replaceCharacters(in: NSRange(location: 0, length: storage?.length ?? 0), with: text)
-            context.coordinator.detectAndApplyLanguage(for: text)
-        }
-        
-        // Apply manual language change from the picker
-        if let storage = context.coordinator.codeStorage, storage.language != language {
+        if coordinator.appliedGeneration != loadGeneration {
+            coordinator.applyLoadedText(text, language: language, generation: loadGeneration, to: textView)
+        } else if let storage = coordinator.codeStorage, storage.language != language {
+            // Manual language change from the picker
             storage.language = language
+            textView.autoCloseQuotes = Coordinator.pairsQuotes(language)
         }
         
-        let newFont = NSFont.monospacedSystemFont(ofSize: fontSize, weight: .regular)
-        let fontChanged = context.coordinator.rulerView?.fontSize != fontSize
+        let newFont = editorFont.nsFont(size: fontSize)
+        let fontChanged = coordinator.rulerView?.fontSize != fontSize
+            || coordinator.currentEditorFont != editorFont
         if fontChanged {
-            context.coordinator.rulerView?.fontSize = fontSize
+            coordinator.rulerView?.fontSize = fontSize
+            coordinator.currentEditorFont = editorFont
         }
         
-        let isDark = NSApp.effectiveAppearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
-        let theme = isDark ? "atom-one-dark" : "xcode"
-        let themeChanged = context.coordinator.lastAppliedTheme != theme
+        let theme = themeName
+        let themeChanged = coordinator.lastAppliedTheme != theme
         if themeChanged {
-            context.coordinator.lastAppliedTheme = theme
-            context.coordinator.highlightr?.setTheme(to: theme)
+            coordinator.lastAppliedTheme = theme
+            coordinator.highlightr?.setTheme(to: theme)
+            coordinator.applyThemeColors(to: textView, isDark: isDark)
         }
         if themeChanged || fontChanged {
-            context.coordinator.highlightr?.theme.setCodeFont(newFont)
+            coordinator.highlightr?.theme.setCodeFont(newFont)
             // Re-highlight the entire text so the new font applies immediately,
             // not just on the next edit.
-            if let storage = context.coordinator.codeStorage {
+            if let storage = coordinator.codeStorage {
                 let lang = storage.language
-                storage.language = ""
+                // nil short-circuits inside CodeAttributedString.highlight() before it
+                // dispatches any work, unlike "" (which isn't nil, so it still fires a
+                // wasted async highlight pass with an invalid language string).
+                storage.language = nil
                 storage.language = lang
             }
             textView.typingAttributes[.font] = newFont
-            context.coordinator.rulerView?.needsDisplay = true
-        }
-        if isDark {
-            textView.backgroundColor = context.coordinator.highlightr?.theme.themeBackgroundColor ?? AppTheme.editorDarkBG
-            textView.insertionPointColor = AppTheme.teal
-        } else {
-            textView.backgroundColor = context.coordinator.highlightr?.theme.themeBackgroundColor ?? .textBackgroundColor
-            textView.insertionPointColor = NSColor(AppTheme.tealSUI)
+            coordinator.rulerView?.needsDisplay = true
         }
         
         // Feature 8 – Word wrap
-        if wordWrap != context.coordinator.currentWordWrap {
-            context.coordinator.currentWordWrap = wordWrap
-            let rulerView = context.coordinator.rulerView
+        if wordWrap != coordinator.currentWordWrap {
+            coordinator.currentWordWrap = wordWrap
+            let rulerView = coordinator.rulerView
             if wordWrap {
                 textView.isHorizontallyResizable = false
                 textView.autoresizingMask = [.width]
@@ -1424,19 +2412,23 @@ struct CustomTextEditor: NSViewRepresentable {
     
     func makeCoordinator() -> Coordinator { Coordinator(self) }
     
-    class Coordinator: NSObject, NSTextViewDelegate {
+    class Coordinator: NSObject, NSTextViewDelegate, HighlightDelegate {
         var parent: CustomTextEditor
         var rulerView: LineNumberRulerView?
         var scrollView: NSScrollView?
+        weak var textView: MangleTextView?
         var highlightr: Highlightr?
         var codeStorage: CodeAttributedString?
         var lastAppliedTheme: String?
+        var currentEditorFont: EditorFont = .system
         // Feature 8
         var currentWordWrap: Bool = true
-        // Bracket highlighting
-        var bracketHighlightRanges: [NSRange] = []
-        // Suppresses cursor callbacks during programmatic text replacement from updateNSView
+        var appliedGeneration = -1
+        // Suppresses selection callbacks during programmatic text replacement
         var isApplyingProgrammaticChange = false
+        
+        private var textChangeWork: DispatchWorkItem?
+        private var statsGeneration = 0
         
         init(_ parent: CustomTextEditor) { self.parent = parent }
         
@@ -1444,26 +2436,79 @@ struct CustomTextEditor: NSViewRepresentable {
             NotificationCenter.default.removeObserver(self)
         }
         
-        func detectAndApplyLanguage(for text: String) {
-            guard let codeStorage, !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
-            guard !parent.manualLanguage else { return }
-            DispatchQueue.global(qos: .userInitiated).async {
-                let detected = Self.guessLanguage(text)
-                DispatchQueue.main.async {
-                    guard !self.parent.manualLanguage else { return }
-                    codeStorage.language = detected
-                    self.parent.language = detected
-                }
+        static func pairsQuotes(_ language: String) -> Bool {
+            language != "plaintext" && language != "markdown"
+        }
+        
+        func applyThemeColors(to textView: NSTextView, isDark: Bool) {
+            let themeBG = highlightr?.theme.themeBackgroundColor
+            textView.backgroundColor = themeBG ?? (isDark ? AppTheme.editorDarkBG : .textBackgroundColor)
+            textView.insertionPointColor = isDark ? AppTheme.teal : NSColor(AppTheme.tealSUI)
+        }
+        
+        /// Pushes freshly loaded text into the editor: highlights once with the already-detected
+        /// language, starts a fresh undo history, and puts the caret at the top.
+        func applyLoadedText(_ text: String, language: String, generation: Int, to textView: NSTextView) {
+            appliedGeneration = generation
+            guard let storage = codeStorage else {
+                textView.string = text
+                return
             }
+            isApplyingProgrammaticChange = true
+            // Disable highlighting while replacing so we don't run a pass with the previous
+            // document's language, then highlight once with the right one.
+            storage.language = nil
+            storage.beginEditing()
+            storage.replaceCharacters(in: NSRange(location: 0, length: storage.length), with: text)
+            let font = currentEditorFont.nsFont(size: parent.fontSize)
+            let fg: NSColor = parent.isDark ? NSColor(white: 0.85, alpha: 1) : NSColor(white: 0.1, alpha: 1)
+            storage.setAttributes([.font: font, .foregroundColor: fg], range: NSRange(location: 0, length: storage.length))
+            storage.endEditing()
+            tokenCounts = [:]
+            dirtyBlock = nil
+            storage.language = language
+            
+            // The window (and its undo manager) is reused across sessions; without this, ⌘Z
+            // after opening new text replayed the previous document's edits against it.
+            textView.undoManager?.removeAllActions()
+            if let mtv = textView as? MangleTextView {
+                mtv.findRanges = []
+                mtv.currentFindRange = nil
+                mtv.bracketRanges = []
+                mtv.autoCloseQuotes = Self.pairsQuotes(language)
+                let indentation = Indentation.detect(in: text) ?? .defaultForSettings
+                mtv.indentation = indentation
+                if parent.status.indentation != indentation { parent.status.indentation = indentation }
+            }
+            textView.setSelectedRange(NSRange(location: 0, length: 0))
+            textView.scrollRangeToVisible(NSRange(location: 0, length: 0))
+            isApplyingProgrammaticChange = false
+            
+            updateCursor(in: textView)
+            scheduleTextChange(for: textView, delay: 0)
         }
         
         private static var guessCache: [Int: String] = [:]
+        // guessLanguage is a static utility callable from any thread, and Swift
+        // Dictionary isn't safe for concurrent mutation, so guard the cache.
+        private static let guessCacheLock = NSLock()
 
-        static func guessLanguage(_ text: String) -> String {
+        static func guessLanguage(_ fullText: String) -> String {
+            // A bounded prefix is plenty to recognise a language, and keeps detection (and the
+            // cache-key hash) cheap for multi-MB pastes and on every history row.
+            let text = fullText.utf16.count > 20_000 ? String(fullText.prefix(20_000)) : fullText
             let key = text.hashValue
-            if let hit = guessCache[key] { return hit }
+            guessCacheLock.lock()
+            if let hit = guessCache[key] {
+                guessCacheLock.unlock()
+                return hit
+            }
+            guessCacheLock.unlock()
             let result = _guessRaw(text)
+            guessCacheLock.lock()
+            if guessCache.count > 1_000 { guessCache.removeAll() }
             guessCache[key] = result
+            guessCacheLock.unlock()
             return result
         }
 
@@ -1586,86 +2631,272 @@ struct CustomTextEditor: NSViewRepresentable {
             rulerView?.needsDisplay = true
         }
         
+        @objc func codeStorageDidProcessEditing(_ notification: Notification) {
+            guard let storage = notification.object as? NSTextStorage else { return }
+            if storage.editedMask.contains(.editedCharacters) {
+                textView?.noteCharactersEdited(at: storage.editedRange.location)
+            }
+            rulerView?.needsDisplay = true
+        }
+        
         func textDidChange(_ notification: Notification) {
             guard let textView = notification.object as? NSTextView else { return }
-            parent.text = textView.string
+            scheduleTextChange(for: textView, delay: 0.12)
+        }
+        
+        /// Debounced: recompute stats off the main thread and notify the view. Typing a burst
+        /// of characters does this once, after the burst, instead of per keystroke.
+        private func scheduleTextChange(for textView: NSTextView, delay: TimeInterval) {
+            textChangeWork?.cancel()
+            let work = DispatchWorkItem { [weak self, weak textView] in
+                guard let self, let textView else { return }
+                self.statsGeneration += 1
+                let generation = self.statsGeneration
+                let snapshot = textView.string
+                let status = self.parent.status
+                DispatchQueue.global(qos: .userInitiated).async {
+                    let stats = TextStats.compute(snapshot)
+                    let lineEnding = LineEnding.detect(in: snapshot)
+                    DispatchQueue.main.async {
+                        guard generation == self.statsGeneration else { return }
+                        if status.lineEnding != lineEnding { status.lineEnding = lineEnding }
+                        if status.lines != stats.lines { status.lines = stats.lines }
+                        if status.words != stats.words { status.words = stats.words }
+                        if status.chars != stats.chars { status.chars = stats.chars }
+                        self.rulerView?.setLineCount(stats.lines)
+                    }
+                }
+                self.parent.onTextChange?()
+            }
+            textChangeWork = work
+            DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: work)
+        }
+
+        // MARK: - Multi-line construct highlighting
+        //
+        // Highlightr's CodeAttributedString re-lexes only the single edited paragraph per
+        // keystroke, with no memory of surrounding lines, so multi-line constructs (block
+        // comments, triple-quoted strings) lose correct highlighting past their opening line.
+        // We intercept those paragraph passes via HighlightDelegate: when an edit sits inside
+        // such a construct — or adds/removes one of its delimiters — we skip Highlightr's pass
+        // and, on the next run-loop turn, re-highlight the whole affected region ourselves
+        // (from the construct's opening line to its close, or to the end of the document when
+        // a delimiter appeared/disappeared). Everything else uses normal per-line highlighting.
+
+        private static let blockCommentLanguages: Set<String> = [
+            "c", "cpp", "java", "javascript", "typescript", "css", "scss", "less",
+            "swift", "kotlin", "go", "rust", "php", "graphql"
+        ]
+        private static func blockDelimiters(for language: String) -> [(open: String, close: String)] {
+            var result: [(String, String)] = []
+            if blockCommentLanguages.contains(language) { result.append(("/*", "*/")) }
+            if language == "xml" || language == "markdown" { result.append(("<!--", "-->")) }
+            if language == "python" { result.append(("\"\"\"", "\"\"\"")); result.append(("'''", "'''")) }
+            return result
+        }
+        /// Delimiter counts as of the last edit, keyed by opening delimiter.
+        private var tokenCounts: [String: (open: Int, close: Int)] = [:]
+        /// Pending block re-highlight: earliest dirty location, distance of the latest dirty
+        /// end from the end of the document (stable under edits before it), and whether it
+        /// must run to the end of the document.
+        private var dirtyBlock: (start: Int, tail: Int, toEnd: Bool)?
+        private let regionQueue = DispatchQueue(label: "co.liamo.mangle.highlight-region", qos: .userInitiated)
+        /// Regions up to this size are highlighted synchronously (well under a frame);
+        /// larger ones go to a background queue.
+        private static let syncRegionLimit = 30_000
+        
+        func shouldHighlight(_ range: NSRange) -> Bool {
+            guard let storage = codeStorage, let language = storage.language else { return true }
+            let text = storage.string as NSString
+            let len = text.length
+            let delimiters = Self.blockDelimiters(for: language)
+            guard !delimiters.isEmpty, len < 300_000 else { return true }
+            
+            let isFullPass = range.location == 0 && range.length >= len
+            var countsChanged = false
+            for d in delimiters {
+                let all = NSRange(location: 0, length: len)
+                let open = text.occurrences(of: d.open, in: all)
+                let close = d.open == d.close ? open : text.occurrences(of: d.close, in: all)
+                if let previous = tokenCounts[d.open], previous.open != open || previous.close != close {
+                    countsChanged = true
+                } else if tokenCounts[d.open] == nil {
+                    countsChanged = true
+                }
+                tokenCounts[d.open] = (open, close)
+            }
+            if isFullPass {
+                dirtyBlock = nil
+                return true
+            }
+            let inside = delimiters.contains { blockOpener(before: range.location, open: $0.open, close: $0.close, in: text) != nil }
+            guard countsChanged || inside || dirtyBlock != nil else { return true }
+            
+            let tail = len - NSMaxRange(range)
+            if let pending = dirtyBlock {
+                dirtyBlock = (min(pending.start, range.location), min(pending.tail, tail), pending.toEnd || countsChanged)
+            } else {
+                dirtyBlock = (range.location, tail, countsChanged)
+                DispatchQueue.main.async { [weak self] in self?.flushDirtyBlock() }
+            }
+            return false
+        }
+        
+        /// Location of the unclosed opening delimiter before `location`, if it's inside a construct.
+        private func blockOpener(before location: Int, open: String, close: String, in text: NSString) -> Int? {
+            let before = NSRange(location: 0, length: location)
+            if open == close {
+                guard text.occurrences(of: open, in: before) % 2 == 1 else { return nil }
+                let loc = text.range(of: open, options: [.literal, .backwards], range: before).location
+                return loc == NSNotFound ? nil : loc
+            }
+            let lastOpen = text.range(of: open, options: [.literal, .backwards], range: before).location
+            guard lastOpen != NSNotFound else { return nil }
+            let lastClose = text.range(of: close, options: [.literal, .backwards], range: before).location
+            return lastClose == NSNotFound || lastOpen > lastClose ? lastOpen : nil
+        }
+        
+        /// Computes the region to re-highlight from the *current* text, so edits made while
+        /// a pass was pending are folded in rather than racing it.
+        private func flushDirtyBlock() {
+            guard let dirty = dirtyBlock else { return }
+            dirtyBlock = nil
+            guard let storage = codeStorage, let language = storage.language else { return }
+            let text = storage.string as NSString
+            let len = text.length
+            let delimiters = Self.blockDelimiters(for: language)
+            
+            let dirtyStart = min(dirty.start, len)
+            let dirtyEnd = max(dirtyStart, len - min(dirty.tail, len))
+            var start = text.lineRange(for: NSRange(location: dirtyStart, length: 0)).location
+            var end = NSMaxRange(text.lineRange(for: NSRange(location: dirtyEnd, length: 0)))
+            if dirty.toEnd { end = len }
+            for d in delimiters {
+                guard let opener = blockOpener(before: dirtyStart, open: d.open, close: d.close, in: text) else { continue }
+                start = min(start, text.lineRange(for: NSRange(location: opener, length: 0)).location)
+                if !dirty.toEnd {
+                    let searchFrom = dirtyEnd
+                    let nextClose = text.range(of: d.close, options: .literal, range: NSRange(location: searchFrom, length: len - searchFrom))
+                    end = max(end, nextClose.location == NSNotFound
+                              ? len
+                              : NSMaxRange(text.lineRange(for: NSRange(location: NSMaxRange(nextClose), length: 0))))
+                }
+            }
+            let region = NSRange(location: start, length: max(0, min(end, len) - start))
+            guard region.length > 0 else { return }
+            highlightRegion(region, language: language)
+        }
+        
+        private func highlightRegion(_ region: NSRange, language: String) {
+            guard let storage = codeStorage, let highlightr else { return }
+            let code = (storage.string as NSString).substring(with: region)
+            
+            func apply(_ highlighted: NSAttributedString) -> Bool {
+                // Drop stale results: the text changed or the language switched meanwhile.
+                guard NSMaxRange(region) <= storage.length,
+                      storage.language == language,
+                      highlighted.string == code,
+                      (storage.string as NSString).substring(with: region) == code else { return false }
+                storage.beginEditing()
+                highlighted.enumerateAttributes(in: NSRange(location: 0, length: highlighted.length)) { attrs, r, _ in
+                    storage.setAttributes(attrs, range: NSRange(location: region.location + r.location, length: r.length))
+                }
+                storage.endEditing()
+                return true
+            }
+            
+            if region.length <= Self.syncRegionLimit {
+                if let highlighted = highlightr.highlight(code, as: language) { _ = apply(highlighted) }
+                return
+            }
+            regionQueue.async { [weak self] in
+                guard let highlighted = highlightr.highlight(code, as: language) else { return }
+                DispatchQueue.main.async {
+                    guard let self, !apply(highlighted) else { return }
+                    // The text changed while we were highlighting; retry over the same span
+                    // (to the end of the document, since its end may have moved).
+                    let len = storage.length
+                    let start = min(region.location, len)
+                    if let pending = self.dirtyBlock {
+                        self.dirtyBlock = (min(pending.start, start), 0, true)
+                    } else {
+                        self.dirtyBlock = (start, 0, true)
+                        DispatchQueue.main.async { [weak self] in self?.flushDirtyBlock() }
+                    }
+                }
+            }
         }
         
         // Feature 1 – cursor position
         func textViewDidChangeSelection(_ notification: Notification) {
             guard !isApplyingProgrammaticChange else { return }
             guard let textView = notification.object as? NSTextView else { return }
+            updateCursor(in: textView)
+        }
+        
+        private func updateCursor(in textView: NSTextView) {
             let nsText = textView.string as NSString
-            let loc = textView.selectedRange().location
-            let safeLen = min(loc, nsText.length)
-            let prefix = nsText.substring(with: NSRange(location: 0, length: safeLen))
-            let lineNum = prefix.components(separatedBy: "\n").count
+            let loc = min(textView.selectedRange().location, nsText.length)
+            let lineNum = (textView as? MangleTextView)?.lineNumber(at: loc)
+                ?? nsText.countNewlines(in: NSRange(location: 0, length: loc)) + 1
             
-            // Find start of the current line
-            var lineStart = 0, lineEnd = 0, contentsEnd = 0
-            nsText.getLineStart(&lineStart, end: &lineEnd, contentsEnd: &contentsEnd,
-                                for: NSRange(location: safeLen, length: 0))
-            let col = loc - lineStart + 1
+            var lineStart = 0
+            nsText.getLineStart(&lineStart, end: nil, contentsEnd: nil, for: NSRange(location: loc, length: 0))
+            // Count characters (grapheme clusters), not UTF-16 units, so an emoji is one column.
+            let col = nsText.substring(with: NSRange(location: lineStart, length: loc - lineStart)).count + 1
             
-            rulerView?.activeLine = lineNum
-            rulerView?.needsDisplay = true
-            parent.onCursorChange?(lineNum, col)
+            if rulerView?.activeLine != lineNum {
+                rulerView?.activeLine = lineNum
+                rulerView?.needsDisplay = true
+            }
+            let status = parent.status
+            if status.cursorLine != lineNum { status.cursorLine = lineNum }
+            if status.cursorColumn != col { status.cursorColumn = col }
             
             highlightMatchingBracket(in: textView)
         }
         
         // MARK: - Bracket Highlighting
         
-        private static let bracketPairs: [Character: Character] = [
-            "(": ")", "{": "}", "[": "]",
-            ")": "(", "}": "{", "]": "["
+        private static let bracketPairs: [unichar: unichar] = [
+            40: 41, 123: 125, 91: 93,   // ( { [  →  ) } ]
+            41: 40, 125: 123, 93: 91
         ]
-        private static let openBrackets: Set<Character> = ["(", "{", "["]
-        private static let closeBrackets: Set<Character> = [")", "}", "]"]
+        private static let openBrackets: Set<unichar> = [40, 123, 91]
+        /// Bound the matching scan so a caret next to the outer brace of a huge minified
+        /// file doesn't scan megabytes on every caret move.
+        private static let bracketScanLimit = 20_000
         
         private func highlightMatchingBracket(in textView: NSTextView) {
-            guard let storage = textView.textStorage else { return }
-            
-            // Clear previous bracket highlights
-            for range in bracketHighlightRanges {
-                if range.location + range.length <= storage.length {
-                    storage.removeAttribute(.backgroundColor, range: range)
-                }
+            guard let mtv = textView as? MangleTextView else { return }
+            let sel = textView.selectedRange()
+            guard sel.length == 0 else {
+                if !mtv.bracketRanges.isEmpty { mtv.bracketRanges = [] }
+                return
             }
-            bracketHighlightRanges = []
-            
-            let str = textView.string
-            let loc = textView.selectedRange().location
-            guard textView.selectedRange().length == 0 else { return }
             
             // Try char before cursor first, then char after cursor
-            let nsStr = str as NSString
+            let nsStr = textView.string as NSString
             let nsLen = nsStr.length
-            let candidates: [Int] = [loc - 1, loc].filter { $0 >= 0 && $0 < nsLen }
-            var foundAnchor: Int? = nil
-            var foundChar: Character? = nil
-            for pos in candidates {
-                let uc = nsStr.character(at: pos)
-                guard let scalar = Unicode.Scalar(uc) else { continue }
-                let ch = Character(scalar)
-                if Self.bracketPairs[ch] != nil {
-                    foundAnchor = pos
-                    foundChar = ch
-                    break
-                }
+            let loc = sel.location
+            var anchor: Int? = nil
+            for pos in [loc - 1, loc] where pos >= 0 && pos < nsLen {
+                if Self.bracketPairs[nsStr.character(at: pos)] != nil { anchor = pos; break }
             }
-
-            guard let anchor = foundAnchor, let bracketChar = foundChar,
-                  let matchChar = Self.bracketPairs[bracketChar] else { return }
+            guard let anchor else {
+                if !mtv.bracketRanges.isEmpty { mtv.bracketRanges = [] }
+                return
+            }
+            let bracketChar = nsStr.character(at: anchor)
+            guard let matchChar = Self.bracketPairs[bracketChar] else { return }
 
             let isOpen = Self.openBrackets.contains(bracketChar)
             var depth = 0
             var matchPos: Int? = nil
-
             if isOpen {
-                for i in anchor..<nsLen {
-                    guard let scalar = Unicode.Scalar(nsStr.character(at: i)) else { continue }
-                    let ch = Character(scalar)
+                let end = min(nsLen, anchor + Self.bracketScanLimit)
+                for i in anchor..<end {
+                    let ch = nsStr.character(at: i)
                     if ch == bracketChar { depth += 1 }
                     else if ch == matchChar {
                         depth -= 1
@@ -1673,9 +2904,9 @@ struct CustomTextEditor: NSViewRepresentable {
                     }
                 }
             } else {
-                for i in stride(from: anchor, through: 0, by: -1) {
-                    guard let scalar = Unicode.Scalar(nsStr.character(at: i)) else { continue }
-                    let ch = Character(scalar)
+                let end = max(0, anchor - Self.bracketScanLimit)
+                for i in stride(from: anchor, through: end, by: -1) {
+                    let ch = nsStr.character(at: i)
                     if ch == bracketChar { depth += 1 }
                     else if ch == matchChar {
                         depth -= 1
@@ -1684,20 +2915,9 @@ struct CustomTextEditor: NSViewRepresentable {
                 }
             }
             
-            let isDark = NSApp.effectiveAppearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
-            let highlightColor = isDark
-            ? NSColor(red: 0.3, green: 0.6, blue: 0.6, alpha: 0.45)
-            : NSColor(red: 0.2, green: 0.7, blue: 0.7, alpha: 0.3)
-            
-            let anchorRange = NSRange(location: anchor, length: 1)
-            storage.addAttribute(.backgroundColor, value: highlightColor, range: anchorRange)
-            bracketHighlightRanges.append(anchorRange)
-            
-            if let mp = matchPos {
-                let matchRange = NSRange(location: mp, length: 1)
-                storage.addAttribute(.backgroundColor, value: highlightColor, range: matchRange)
-                bracketHighlightRanges.append(matchRange)
-            }
+            var ranges = [NSRange(location: anchor, length: 1)]
+            if let mp = matchPos { ranges.append(NSRange(location: mp, length: 1)) }
+            if mtv.bracketRanges != ranges { mtv.bracketRanges = ranges }
         }
         
         func textView(_ textView: NSTextView, doCommandBy commandSelector: Selector) -> Bool {
@@ -1726,8 +2946,10 @@ struct CustomTextEditor: NSViewRepresentable {
         }
         
         private func handleTab(textView: NSTextView, reverse: Bool) {
-            let tabSize = SettingsManager.shared.tabSize
-            let spaces = String(repeating: " ", count: tabSize)
+            let mtv = textView as? MangleTextView
+            let indentation = mtv?.indentation ?? .defaultForSettings
+            let tabSize = mtv?.indentWidth ?? max(SettingsManager.shared.tabSize, 1)
+            let spaces = indentation.unit
             let selectedRange = textView.selectedRange()
             let text = textView.string as NSString
             
@@ -1740,60 +2962,62 @@ struct CustomTextEditor: NSViewRepresentable {
             if isMultiline {
                 let fullRange = NSRange(location: lineStart, length: lineEnd - lineStart)
                 let selectedLines = text.substring(with: fullRange)
-                var modifiedLines: [String] = []
-                let lines = selectedLines.components(separatedBy: "\n")
+                var lines = selectedLines.components(separatedBy: "\n")
+                // The block usually ends with the last line's newline, which leaves an empty
+                // trailing component. Indenting that used to push the *next* line in as well.
+                let endsWithNewline = selectedLines.hasSuffix("\n")
+                if endsWithNewline { lines.removeLast() }
                 
+                let modifiedLines: [String]
                 if reverse {
-                    let indents = lines
-                        .filter { !$0.trimmingCharacters(in: .whitespaces).isEmpty }
-                        .map { line -> Int in
-                            if line.hasPrefix("\t") { return 1 }
-                            return line.prefix(while: { $0 == " " }).count
-                        }
-                        .filter { $0 > 0 }
-                    let toRemove = min(indents.min() ?? 0, tabSize)
-                    for line in lines {
-                        if line.hasPrefix("\t") {
-                            modifiedLines.append(String(line.dropFirst()))
-                        } else {
-                            modifiedLines.append(String(line.dropFirst(min(line.prefix(while: { $0 == " " }).count, toRemove))))
-                        }
+                    // Each line loses up to one indent level on its own (a tab, or up to
+                    // tabSize spaces) — matching Xcode/VS Code.
+                    modifiedLines = lines.map { line in
+                        if line.hasPrefix("\t") { return String(line.dropFirst()) }
+                        let leading = line.prefix(while: { $0 == " " }).count
+                        return String(line.dropFirst(min(leading, tabSize)))
                     }
                 } else {
-                    for line in lines { modifiedLines.append(spaces + line) }
+                    modifiedLines = lines.map { $0.isEmpty ? $0 : spaces + $0 }
                 }
                 
-                let newText = modifiedLines.joined(separator: "\n")
+                let newText = modifiedLines.joined(separator: "\n") + (endsWithNewline ? "\n" : "")
                 if textView.shouldChangeText(in: fullRange, replacementString: newText) {
                     textView.replaceCharacters(in: fullRange, with: newText)
                     textView.didChangeText()
-                    let lengthDiff = (newText as NSString).length - (selectedLines as NSString).length
-                    let textLength = (textView.string as NSString).length
-                    let newLocation = min(selectedRange.location, textLength)
-                    let newLength = max(0, selectedRange.length + lengthDiff)
-                    let clampedLength = min(newLength, textLength - newLocation)
-                    textView.setSelectedRange(NSRange(location: newLocation, length: clampedLength))
+                    // Keep the indented lines selected so Tab/⇧Tab can be repeated.
+                    let selectedLength = (newText as NSString).length - (endsWithNewline ? 1 : 0)
+                    textView.setSelectedRange(NSRange(location: lineStart, length: selectedLength))
                 }
             } else {
                 if reverse {
                     let lineText = text.substring(with: NSRange(location: lineStart, length: contentsEnd - lineStart))
                     let beforeCursor = lineText.prefix(selectedRange.location - lineStart)
-                    if beforeCursor.hasSuffix(spaces) {
-                        let removeRange = NSRange(location: selectedRange.location - tabSize, length: tabSize)
-                        if textView.shouldChangeText(in: removeRange, replacementString: "") {
-                            textView.replaceCharacters(in: removeRange, with: "")
-                            textView.didChangeText()
-                        }
-                    } else if beforeCursor.hasSuffix("\t") {
+                    if beforeCursor.hasSuffix("\t") {
                         let removeRange = NSRange(location: selectedRange.location - 1, length: 1)
                         if textView.shouldChangeText(in: removeRange, replacementString: "") {
                             textView.replaceCharacters(in: removeRange, with: "")
                             textView.didChangeText()
                         }
+                    } else {
+                        let trailingSpaces = beforeCursor.reversed().prefix(while: { $0 == " " }).count
+                        let toRemove = min(trailingSpaces, tabSize)
+                        if toRemove > 0 {
+                            let removeRange = NSRange(location: selectedRange.location - toRemove, length: toRemove)
+                            if textView.shouldChangeText(in: removeRange, replacementString: "") {
+                                textView.replaceCharacters(in: removeRange, with: "")
+                                textView.didChangeText()
+                            }
+                        }
                     }
                 } else {
-                    if textView.shouldChangeText(in: selectedRange, replacementString: spaces) {
-                        textView.replaceCharacters(in: selectedRange, with: spaces)
+                    // Advance to the next tab stop rather than inserting a fixed width.
+                    let column = selectedRange.location - lineStart
+                    let insertion = indentation == .tabs
+                        ? "\t"
+                        : String(repeating: " ", count: tabSize - (column % tabSize))
+                    if textView.shouldChangeText(in: selectedRange, replacementString: insertion) {
+                        textView.replaceCharacters(in: selectedRange, with: insertion)
                         textView.didChangeText()
                     }
                 }
@@ -1802,18 +3026,96 @@ struct CustomTextEditor: NSViewRepresentable {
     }
 }
 
+// MARK: - Status Bar Labels
+
+/// "Spaces: 4 · LF" — shows the document's indentation and line endings, and changes them.
+private struct DocumentFormatMenu: View {
+    @ObservedObject var status: EditorStatus
+    let onIndentation: (Indentation) -> Void
+    let onConvertIndentation: (Indentation) -> Void
+    let onLineEnding: (LineEnding) -> Void
+    
+    private let options: [Indentation] = [.spaces(2), .spaces(4), .tabs]
+    
+    var body: some View {
+        Menu {
+            Picker("Indent Using", selection: Binding(get: { status.indentation }, set: onIndentation)) {
+                ForEach(options, id: \.self) { Text($0.label).tag($0) }
+            }
+            .pickerStyle(.inline)
+            Menu("Convert Indentation To") {
+                ForEach(options, id: \.self) { option in
+                    Button(option.label) { onConvertIndentation(option) }
+                }
+            }
+            Divider()
+            Section("Line Endings: \(status.lineEnding.rawValue)") {
+                Button("Convert to LF") { onLineEnding(.lf) }
+                Button("Convert to CRLF") { onLineEnding(.crlf) }
+                Button("Convert to CR") { onLineEnding(.cr) }
+            }
+        } label: {
+            Text("\(status.indentation.label) · \(status.lineEnding.rawValue)")
+                .font(.caption)
+                .foregroundColor(.secondary)
+        }
+        .menuStyle(.borderlessButton)
+        .fixedSize()
+        .help("Indentation and line endings")
+    }
+}
+
+private struct CursorPositionLabel: View {
+    @ObservedObject var status: EditorStatus
+    
+    var body: some View {
+        Text("\(status.cursorLine):\(status.cursorColumn)")
+            .font(.system(size: 12).monospacedDigit())
+            .foregroundColor(AppTheme.tealSUI)
+            .fixedSize()
+    }
+}
+
+private struct TextStatsLabel: View {
+    @ObservedObject var status: EditorStatus
+    
+    var body: some View {
+        HStack(spacing: 10) {
+            pill(value: status.lines, label: "ln", valueWidth: 18)
+            pill(value: status.words, label: "wd", valueWidth: 24)
+            pill(value: status.chars, label: "ch", valueWidth: 34)
+        }
+        .fixedSize()
+    }
+    
+    private func pill(value: Int, label: String, valueWidth: CGFloat) -> some View {
+        HStack(spacing: 3) {
+            Text("\(value)")
+                .monospacedDigit()
+                .foregroundColor(AppTheme.tealSUI)
+                .frame(minWidth: valueWidth, alignment: .trailing)
+            Text(label)
+                .foregroundColor(.secondary)
+        }
+        .font(.caption)
+    }
+}
+
 // MARK: - Shortcuts Popover
 
 private struct ShortcutsPopover: View {
     private let sections: [(title: String, shortcuts: [(keys: String, action: String)])] = [
-        ("Editing", [
+        ("General", [
+            ("⌘ K",        "Command palette"),
             ("⌘ S",        "Save to clipboard"),
-            ("⌘ F",        "Find & replace"),
+            ("⌘ ↩",        "Save and paste into previous app"),
+            ("Esc",        "Close editor"),
+        ]),
+        ("Editing", [
             ("⌘ Z",        "Undo"),
             ("⌘ ⇧ Z",      "Redo"),
-            ("⌘ A",        "Select all"),
-            ("⌘ L",        "Select line"),
-            ("⌘ D",        "Duplicate line"),
+            ("⌘ /",        "Toggle comment"),
+            ("⌘ ⇧ D",      "Duplicate line"),
             ("⌘ ⇧ K",      "Delete line"),
             ("⌥ ↑",        "Move line up"),
             ("⌥ ↓",        "Move line down"),
@@ -1821,20 +3123,34 @@ private struct ShortcutsPopover: View {
             ("Tab",        "Indent"),
             ("⇧ Tab",      "Unindent"),
         ]),
+        ("Selection", [
+            ("⌘ A",        "Select all"),
+            ("⌘ L",        "Select line"),
+            ("⌘ D",        "Select next occurrence"),
+            ("⌃ ⌘ G",      "Select all occurrences"),
+            ("⌥ ⇧ ↑",      "Expand selection"),
+            ("⌥ ⇧ ↓",      "Shrink selection"),
+        ]),
+        ("Find & Navigate", [
+            ("⌘ F",        "Find & replace"),
+            ("⌘ G",        "Find next"),
+            ("⌘ ⇧ G",      "Find previous"),
+            ("⌘ E",        "Use selection for find"),
+            ("⌃ G",        "Go to line"),
+        ]),
         ("View", [
             ("⌘ =",        "Increase font size"),
             ("⌘ −",        "Decrease font size"),
             ("⌘ 0",        "Reset font size"),
+            ("⌥ Z",        "Toggle word wrap"),
         ]),
         ("Transform", [
+            ("⌘ T",        "Open Transform menu"),
             ("⌘ ⇧ F",      "Format code"),
             ("⌘ ⇧ T",      "Trim whitespace"),
             ("⌘ ⇧ L",      "Lowercase"),
             ("⌘ ⇧ U",      "Uppercase"),
             ("⌘ ⇧ N",      "Normalize indentation"),
-        ]),
-        ("General", [
-            ("Esc",        "Close editor"),
         ]),
     ]
     
