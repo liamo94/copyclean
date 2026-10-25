@@ -103,15 +103,15 @@ struct CommandPaletteView: View {
         HStack(spacing: 8) {
             Text(cmd.title)
                 .font(.system(size: 13))
-                .foregroundColor(cmd.isEnabled ? (selected ? .white : .primary) : .secondary)
+                .foregroundColor(cmd.isEnabled ? (selected ? AppTheme.onTealSUI.opacity(0.88) : .primary) : (selected ? AppTheme.onTealSUI.opacity(0.45) : .secondary))
             Text(cmd.section)
                 .font(.system(size: 11))
-                .foregroundColor(selected ? .white.opacity(0.75) : .secondary)
+                .foregroundColor(selected ? AppTheme.onTealSUI.opacity(0.6) : .secondary)
             Spacer()
             if let shortcut = cmd.shortcut {
                 Text(shortcut)
                     .font(.system(size: 11, weight: .medium))
-                    .foregroundColor(selected ? .white.opacity(0.85) : .secondary)
+                    .foregroundColor(selected ? AppTheme.onTealSUI.opacity(0.7) : .secondary)
             }
         }
         .padding(.horizontal, 10)

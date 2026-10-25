@@ -179,6 +179,11 @@ class HistoryManager: ObservableObject {
         return (try? data.write(to: url, options: .atomic)) != nil
     }
 
+    /// Re-reads history from disk, e.g. after another copy of the app saved on quitting.
+    func reload() {
+        loadHistory()
+    }
+
     private func loadHistory() {
         if let data = try? Data(contentsOf: Self.historyFileURL),
            let decoded = try? JSONDecoder().decode([HistoryEntry].self, from: data) {

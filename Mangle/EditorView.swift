@@ -8,6 +8,9 @@ import Highlightr
 enum AppTheme {
     static let teal    = NSColor(red: 0.20, green: 0.78, blue: 0.60, alpha: 1.0)
     static let tealSUI = Color(red: 0.20, green: 0.78, blue: 0.60)
+    /// Text on a teal fill — white only reaches ~2:1 contrast there.
+    static let onTeal    = NSColor(red: 0.04, green: 0.10, blue: 0.08, alpha: 0.88)
+    static let onTealSUI = Color(red: 0.04, green: 0.10, blue: 0.08)
     static let editorDarkBG = NSColor(red: 0.11, green: 0.13, blue: 0.13, alpha: 1.0)
     static let gutterDarkBG = NSColor(red: 0.09, green: 0.11, blue: 0.11, alpha: 1.0)
 }
@@ -55,6 +58,8 @@ class LineNumberRulerView: NSRulerView {
     /// Fold chevrons for unfolded blocks only show while the pointer is over the gutter.
     private var isHovering = false { didSet { if isHovering != oldValue { needsDisplay = true } } }
     private static let foldColumnWidth: CGFloat = 16
+    /// Just under the text size, so the numbers read clearly without competing with it.
+    private var numberFontSize: CGFloat { (fontSize * 0.95).rounded() }
     
     override var isFlipped: Bool { true }
     override var requiredThickness: CGFloat { thickness }
@@ -94,7 +99,7 @@ class LineNumberRulerView: NSRulerView {
     }
     
     private func updateThickness() {
-        let font = NSFont.monospacedSystemFont(ofSize: fontSize * 0.85, weight: .semibold)
+        let font = NSFont.monospacedSystemFont(ofSize: numberFontSize, weight: .semibold)
         let digitWidth = ("8" as NSString).size(withAttributes: [.font: font]).width
         let newThickness = showsLineNumbers
             ? max(52, ceil(CGFloat(digitCount) * digitWidth + 12 + Self.foldColumnWidth))
@@ -114,16 +119,12 @@ class LineNumberRulerView: NSRulerView {
         // Derived from the editor background so the gutter suits whichever syntax theme is active.
         let editorBG = textView.backgroundColor.usingColorSpace(.deviceRGB) ?? textView.backgroundColor
         if showsLineNumbers {
-            (editorBG.blended(withFraction: isDark ? 0.18 : 0.04, of: .black)
+            (editorBG.blended(withFraction: isDark ? 0.10 : 0.025, of: .black)
                 ?? (isDark ? AppTheme.gutterDarkBG : NSColor(white: 0.95, alpha: 1.0))).setFill()
             bounds.fill()
             
-            (isDark ? AppTheme.teal.withAlphaComponent(0.45) : AppTheme.teal.withAlphaComponent(0.25)).setStroke()
-            let border = NSBezierPath()
-            border.move(to: NSPoint(x: bounds.width - 0.5, y: bounds.minY))
-            border.line(to: NSPoint(x: bounds.width - 0.5, y: bounds.maxY))
-            border.lineWidth = 1
-            border.stroke()
+            (isDark ? NSColor.white.withAlphaComponent(0.06) : NSColor.black.withAlphaComponent(0.07)).setFill()
+            NSRect(x: bounds.width - 1, y: bounds.minY, width: 1, height: bounds.height).fill()
         } else {
             // Presenting: blend into the editor.
             editorBG.setFill()
@@ -136,18 +137,19 @@ class LineNumberRulerView: NSRulerView {
         let (foldRegions, foldByLine) = showsChevrons ? textView.foldRegions(allowingStale: true) : ([], [:])
         let chevronColor = AppTheme.teal.withAlphaComponent(isDark ? 0.7 : 0.8)
         
+        // Neutral numbers so the current one, in teal, stands out.
+        let numberFont = NSFont.monospacedSystemFont(ofSize: numberFontSize, weight: .regular)
         let inactiveAttrs: [NSAttributedString.Key: Any] = [
-            .font: NSFont.monospacedSystemFont(ofSize: fontSize * 0.85, weight: .regular),
-            .foregroundColor: isDark
-            ? AppTheme.teal.withAlphaComponent(0.55)
-            : AppTheme.teal.withAlphaComponent(0.65)
+            .font: numberFont,
+            .foregroundColor: isDark ? NSColor.white.withAlphaComponent(0.26) : NSColor.black.withAlphaComponent(0.3)
         ]
         let activeAttrs: [NSAttributedString.Key: Any] = [
-            .font: NSFont.monospacedSystemFont(ofSize: fontSize * 0.85, weight: .semibold),
-            .foregroundColor: isDark
-            ? AppTheme.teal.withAlphaComponent(1.0)
-            : AppTheme.teal
+            .font: NSFont.monospacedSystemFont(ofSize: numberFontSize, weight: .semibold),
+            .foregroundColor: AppTheme.teal
         ]
+        // The numbers are smaller than the text, so drop them onto its baseline.
+        let textFont = textView.typingAttributes[.font] as? NSFont ?? NSFont.monospacedSystemFont(ofSize: fontSize, weight: .regular)
+        let baselineShift = max(0, textFont.ascender - numberFont.ascender)
         
         let text  = textView.string as NSString
         let len   = text.length
@@ -156,6 +158,13 @@ class LineNumberRulerView: NSRulerView {
         let h     = bounds.height
         // Read scroll position directly from the text view — always current at draw time.
         let scrollOffset = textView.visibleRect.origin.y
+        
+        // Carry the editor's current-line band across, using its exact rect so it lands on the
+        // caret's wrapped row and hides whenever the editor's does (selection, multiple carets).
+        if showsLineNumbers, let band = textView.currentLineRect() {
+            (isDark ? NSColor.white.withAlphaComponent(0.045) : NSColor.black.withAlphaComponent(0.045)).setFill()
+            NSRect(x: 0, y: band.minY - scrollOffset, width: width - 1, height: band.height).fill(using: .sourceOver)
+        }
 
         func drawNum(_ n: Int, _ docY: CGFloat, lineHeight: CGFloat = 0) {
             // docY is layout-manager space. Add inset → text-view/document space.
@@ -166,7 +175,7 @@ class LineNumberRulerView: NSRulerView {
             if showsLineNumbers {
                 let s  = "\(n)" as NSString
                 let sz = s.size(withAttributes: attrs)
-                s.draw(at: NSPoint(x: width - sz.width - Self.foldColumnWidth - 2, y: y), withAttributes: attrs)
+                s.draw(at: NSPoint(x: width - sz.width - Self.foldColumnWidth - 2, y: y + baselineShift), withAttributes: attrs)
             }
             if let index = foldByLine[n] {
                 let folded = textView.isFolded(foldRegions[index])
@@ -219,7 +228,7 @@ class LineNumberRulerView: NSRulerView {
 
         if charIdx >= len && text.character(at: len - 1) == 10 {
             let extra = layoutManager.extraLineFragmentRect
-            if extra != .zero { drawNum(lineNum, extra.origin.y) }
+            if extra != .zero { drawNum(lineNum, extra.origin.y, lineHeight: extra.height) }
         }
     }
     
@@ -300,7 +309,6 @@ struct EditorView: View {
     @FocusState private var isFindFieldFocused: Bool
     @FocusState private var isReplaceFieldFocused: Bool
     @State private var showShortcuts = false
-    @State private var hoverTransform = false
     @State private var hoverCancel = false
     @State private var hoverKeyboard = false
     @State private var hoverSave = false
@@ -461,6 +469,13 @@ struct EditorView: View {
             }
         }
         .onChange(of: paletteQuery) { paletteIndex = 0 }
+        // The palette is a quick, in-the-moment action: switching away (or hiding the editor)
+        // dismisses it, so coming back lands in the document rather than a stale search.
+        .onReceive(NotificationCenter.default.publisher(for: NSWindow.didResignKeyNotification)) { note in
+            if showPalette, let window = textView?.window, note.object as? NSWindow === window {
+                closePalette()
+            }
+        }
         .onAppear {
             if let monitor = keyMonitor { NSEvent.removeMonitor(monitor) }
             keyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [self] event in
@@ -858,177 +873,167 @@ struct EditorView: View {
         // Cursor position and stats live in their own small views observing `EditorStatus`,
         // so typing and caret moves re-render just those labels — not this whole bar
         // (and its Transform menu) or the editor view around it.
+        // Each step drops the least useful items until the bar fits; shortcuts stay in tooltips.
         ViewThatFits(in: .horizontal) {
-            bottomBarHStack(showStats: true,  showKeyboard: true)
-            bottomBarHStack(showStats: false, showKeyboard: true)
-            bottomBarHStack(showStats: false, showKeyboard: false)
+            bottomBarHStack(showStats: true,  showKeyboard: true,  showBadges: true,  showCursor: true)
+            bottomBarHStack(showStats: false, showKeyboard: true,  showBadges: true,  showCursor: true)
+            bottomBarHStack(showStats: false, showKeyboard: false, showBadges: true,  showCursor: true)
+            bottomBarHStack(showStats: false, showKeyboard: false, showBadges: false, showCursor: true)
+            bottomBarHStack(showStats: false, showKeyboard: false, showBadges: false, showCursor: false)
         }
         .frame(height: 36)
         .background(Color(nsColor: .windowBackgroundColor))
     }
 
     @ViewBuilder
-    private func bottomBarHStack(showStats: Bool, showKeyboard: Bool) -> some View {
+    private func bottomBarHStack(showStats: Bool, showKeyboard: Bool, showBadges: Bool, showCursor: Bool) -> some View {
         HStack(spacing: 0) {
-            CursorPositionLabel(status: viewModel.status)
-                .padding(.horizontal, 10)
-
-            barDivider
-
-            if showStats {
-                TextStatsLabel(status: viewModel.status)
-                    .padding(.horizontal, 10)
-                barDivider
-            }
-            
-            if showKeyboard {
-                DocumentFormatMenu(
-                    status: viewModel.status,
-                    onIndentation: setIndentation,
-                    onConvertIndentation: convertIndentation,
-                    onLineEnding: convertLineEndings
-                )
-                .padding(.horizontal, 8)
-                barDivider
-            }
-            
-            // Transform menu
-            Menu {
-                Menu("Language: \(currentLanguageLabel)") {
-                    languagePickerItems
-                }
-                
-                ForEach(transformSections, id: \.title) { section in
-                    Divider()
-                    Section(section.title) {
-                        ForEach(section.commands) { cmd in
-                            Button(cmd.title, action: cmd.run)
-                                .keyboardShortcut(cmd.keyboardShortcut)
-                                .disabled(!cmd.isEnabled)
-                        }
+            // Left: read-only status, then the document menus.
+            if showCursor {
+                HStack(spacing: 12) {
+                    CursorPositionLabel(status: viewModel.status)
+                    if showStats {
+                        TextStatsLabel(status: viewModel.status)
                     }
                 }
-            } label: {
-                bottomAction("Transform", shortcut: "⌘T", hovered: hoverTransform)
-            }
-            .menuStyle(.borderlessButton)
-            .fixedSize()
-            .padding(.horizontal, 8)
-            .onHover { hoverTransform = $0 }
-            .keyboardShortcut("t", modifiers: .command)
-            
-            barDivider
-            
-            Spacer(minLength: 0)
-            
-            // Word wrap toggle
-            Button {
-                settings.wordWrap.toggle()
-            } label: {
-                Image(systemName: "arrow.down.and.line.horizontal.and.arrow.up")
-                    .foregroundColor(settings.wordWrap ? AppTheme.tealSUI : .secondary)
-                    .font(.system(size: 12))
-                    .padding(.horizontal, 6)
-                    .padding(.vertical, 3)
-                    .background(hoverWordWrap ? Color.secondary.opacity(0.12) : Color.clear)
-                    .cornerRadius(5)
-            }
-            .buttonStyle(.plain)
-            .padding(.horizontal, 4)
-            .onHover { hoverWordWrap = $0 }
-            .overlay(alignment: .top) {
-                if hoverWordWrap {
-                    Text(settings.wordWrap ? "Word Wrap: On" : "Word Wrap: Off")
-                        .font(.caption)
-                        .foregroundColor(.primary)
-                        .padding(.horizontal, 8)
-                        .padding(.vertical, 4)
-                        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 6))
-                        .fixedSize()
-                        .offset(y: -30)
-                        .allowsHitTesting(false)
-                }
-            }
-            
-            barDivider
-            
-            // Feature 3 – Cancel with unsaved-changes guard. A scratch pad just hides: its
-            // text comes back with the scratch shortcut, and goes to history when replaced.
-            Button {
-                closeFindBar()
-                if viewModel.isDirty && !viewModel.isScratch {
-                    showCancelAlert = true
-                } else {
-                    onClose()
-                }
-            } label: {
-                bottomAction(viewModel.isScratch ? "Hide" : "Cancel", shortcut: "Esc", hovered: hoverCancel)
-            }
-            .help(viewModel.isScratch ? "Hide the scratch pad — it comes back where you left it" : "")
-            .buttonStyle(.plain)
-            .keyboardShortcut(.escape, modifiers: [])
-            .padding(.horizontal, 8)
-            .onHover { hoverCancel = $0 }
-            
-            barDivider
-            
-            // Save
-            Button {
-                onSave()
-            } label: {
-                HStack(alignment: .firstTextBaseline, spacing: 6) {
-                    Text("Save")
-                        .fontWeight(.medium)
-                        .foregroundColor(hoverSave ? AppTheme.tealSUI : AppTheme.tealSUI.opacity(0.8))
-                    shortcutBadge("⌘S", hovered: hoverSave)
-                }
-                .font(.system(size: 12))
-                .fixedSize()
-                .padding(.horizontal, 6)
-                .padding(.vertical, 3)
-                .background(hoverSave ? Color.secondary.opacity(0.12) : Color.clear)
-                .cornerRadius(5)
-            }
-            .buttonStyle(.plain)
-            .keyboardShortcut("s", modifiers: .command)
-            .padding(.horizontal, 8)
-            .onHover { hoverSave = $0 }
-            .help("Copy to clipboard and close")
-            
-            barDivider
-            
-            Button {
-                onSaveAndPaste()
-            } label: {
-                bottomAction("Paste", shortcut: "⌘↩", hovered: hoverPaste)
-            }
-            .buttonStyle(.plain)
-            .padding(.horizontal, 8)
-            .onHover { hoverPaste = $0 }
-            .help("Copy, close, and paste into the app you came from")
-            
-            if showKeyboard {
+                .padding(.horizontal, 14)
+
                 barDivider
-                
-                Button {
-                    showShortcuts.toggle()
+            }
+
+            HStack(spacing: 4) {
+                if showKeyboard {
+                    DocumentFormatMenu(
+                        status: viewModel.status,
+                        onIndentation: setIndentation,
+                        onConvertIndentation: convertIndentation,
+                        onLineEnding: convertLineEndings
+                    )
+                }
+
+                Menu {
+                    Menu("Language: \(currentLanguageLabel)") {
+                        languagePickerItems
+                    }
+
+                    ForEach(transformSections, id: \.title) { section in
+                        Divider()
+                        Section(section.title) {
+                            ForEach(section.commands) { cmd in
+                                Button(cmd.title, action: cmd.run)
+                                    .keyboardShortcut(cmd.keyboardShortcut)
+                                    .disabled(!cmd.isEnabled)
+                            }
+                        }
+                    }
                 } label: {
-                    Image(systemName: "keyboard")
-                        .foregroundColor(showShortcuts || hoverKeyboard ? AppTheme.tealSUI : .secondary)
-                        .font(.system(size: 12))
-                        .padding(.horizontal, 6)
-                        .padding(.vertical, 3)
-                        .background(hoverKeyboard ? Color.secondary.opacity(0.12) : Color.clear)
-                        .cornerRadius(5)
+                    Text("Transform")
+                        .font(.system(size: 11))
+                }
+                .menuStyle(.borderlessButton)
+                .fixedSize()
+                .padding(.horizontal, 8)
+                .keyboardShortcut("t", modifiers: .command)
+                .help("Transform text (⌘T)")
+            }
+            .padding(.horizontal, 6)
+
+            Spacer(minLength: 0)
+
+            // Right: view toggles, then the close actions.
+            HStack(spacing: 2) {
+                Button {
+                    settings.wordWrap.toggle()
+                } label: {
+                    barIcon("arrow.down.and.line.horizontal.and.arrow.up", active: settings.wordWrap, hovered: hoverWordWrap)
                 }
                 .buttonStyle(.plain)
-                .popover(isPresented: $showShortcuts, arrowEdge: .top) {
-                    ShortcutsPopover()
+                .onHover { hoverWordWrap = $0 }
+                .help(settings.wordWrap ? "Word Wrap: On" : "Word Wrap: Off")
+
+                if showKeyboard {
+                    Button {
+                        showShortcuts.toggle()
+                    } label: {
+                        barIcon("keyboard", active: showShortcuts, hovered: hoverKeyboard)
+                    }
+                    .buttonStyle(.plain)
+                    .popover(isPresented: $showShortcuts, arrowEdge: .top) {
+                        ShortcutsPopover()
+                    }
+                    .onHover { hoverKeyboard = $0 }
+                    .help("Keyboard shortcuts")
                 }
-                .padding(.horizontal, 8)
-                .onHover { hoverKeyboard = $0 }
             }
+            .padding(.horizontal, 8)
+
+            barDivider
+
+            HStack(spacing: 4) {
+                // Cancel with unsaved-changes guard. A scratch pad just hides: its text
+                // comes back with the scratch shortcut, and goes to history when replaced.
+                Button {
+                    closeFindBar()
+                    if viewModel.isDirty && !viewModel.isScratch {
+                        showCancelAlert = true
+                    } else {
+                        onClose()
+                    }
+                } label: {
+                    bottomAction(viewModel.isScratch ? "Hide" : "Cancel", shortcut: showBadges ? "Esc" : nil, hovered: hoverCancel)
+                }
+                .help(viewModel.isScratch ? "Hide the scratch pad — it comes back where you left it (Esc)" : "Cancel (Esc)")
+                .buttonStyle(.plain)
+                .keyboardShortcut(.escape, modifiers: [])
+                .onHover { hoverCancel = $0 }
+
+                Button {
+                    onSaveAndPaste()
+                } label: {
+                    bottomAction("Paste", shortcut: showBadges ? "⌘↩" : nil, hovered: hoverPaste)
+                }
+                .buttonStyle(.plain)
+                .onHover { hoverPaste = $0 }
+                .help("Copy, close, and paste into the app you came from (⌘↩)")
+
+                // Save is the primary action, so it gets the accent fill.
+                Button {
+                    onSave()
+                } label: {
+                    HStack(alignment: .firstTextBaseline, spacing: 6) {
+                        Text("Save")
+                            .fontWeight(.medium)
+                            .foregroundColor(AppTheme.tealSUI)
+                        if showBadges {
+                            Text("⌘S")
+                                .font(.system(size: 10, weight: .medium))
+                                .foregroundColor(AppTheme.tealSUI.opacity(0.6))
+                        }
+                    }
+                    .font(.system(size: 12))
+                    .fixedSize()
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 3)
+                    .background(AppTheme.tealSUI.opacity(hoverSave ? 0.22 : 0.14))
+                    .cornerRadius(5)
+                }
+                .buttonStyle(.plain)
+                .keyboardShortcut("s", modifiers: .command)
+                .onHover { hoverSave = $0 }
+                .help("Copy to clipboard and close (⌘S)")
+            }
+            .padding(.leading, 8)
+            .padding(.trailing, 10)
         }
+    }
+
+    private func barIcon(_ systemName: String, active: Bool, hovered: Bool) -> some View {
+        Image(systemName: systemName)
+            .font(.system(size: 11))
+            .foregroundColor(active ? AppTheme.tealSUI : .secondary)
+            .frame(width: 24, height: 20)
+            .background(hovered ? Color.secondary.opacity(0.12) : Color.clear)
+            .cornerRadius(5)
     }
     
     private var barDivider: some View {
@@ -1038,11 +1043,13 @@ struct EditorView: View {
     }
     
     @ViewBuilder
-    private func bottomAction(_ label: String, shortcut: String, hovered: Bool = false) -> some View {
+    private func bottomAction(_ label: String, shortcut: String?, hovered: Bool = false) -> some View {
         HStack(alignment: .firstTextBaseline, spacing: 6) {
             Text(label)
                 .foregroundColor(hovered ? .primary : .primary.opacity(0.75))
-            shortcutBadge(shortcut, hovered: hovered)
+            if let shortcut {
+                shortcutBadge(shortcut, hovered: hovered)
+            }
         }
         .font(.system(size: 12))
         .fixedSize()
@@ -1982,7 +1989,10 @@ final class MangleTextView: NSTextView {
         }
         // Repaint just the old and new current-line bands.
         if let oldLineRect { setNeedsDisplay(oldLineRect) }
-        if let newLineRect = currentLineRect(), newLineRect != oldLineRect { setNeedsDisplay(newLineRect) }
+        let newLineRect = currentLineRect()
+        if let newLineRect, newLineRect != oldLineRect { setNeedsDisplay(newLineRect) }
+        // The gutter mirrors the band, including moves between a wrapped line's rows.
+        if newLineRect != oldLineRect { enclosingScrollView?.verticalRulerView?.needsDisplay = true }
         scheduleUnfoldCheck()
     }
     
@@ -2079,7 +2089,7 @@ final class MangleTextView: NSTextView {
     
     // MARK: Current line highlight
     
-    private func currentLineRect() -> NSRect? {
+    func currentLineRect() -> NSRect? {
         guard layoutManager != nil, !hasMultipleSelections, selectedRange().length == 0,
               let caret = caretRect(at: selectedRange().location) else { return nil }
         return NSRect(x: 0, y: caret.minY, width: bounds.width, height: caret.height)
@@ -2970,7 +2980,13 @@ struct CustomTextEditor: NSViewRepresentable {
         // such a construct — or adds/removes one of its delimiters — we skip Highlightr's pass
         // and, on the next run-loop turn, re-highlight the whole affected region ourselves
         // (from the construct's opening line to its close, or to the end of the document when
-        // a delimiter appeared/disappeared). Everything else uses normal per-line highlighting.
+        // a delimiter appeared/disappeared).
+        //
+        // Every other pass comes through here too, rather than Highlightr's own. Those run on
+        // an unordered concurrent queue and read the language when they run, so a pass started
+        // around a language switch (e.g. pasting JSON into a scratch pad) could finish last and
+        // repaint the whole document uncoloured, until each line was edited again. Our passes
+        // are applied in order and only if the text and language still match.
 
         private static let blockCommentLanguages: Set<String> = [
             "c", "cpp", "java", "javascript", "typescript", "css", "scss", "less",
@@ -2991,15 +3007,17 @@ struct CustomTextEditor: NSViewRepresentable {
         private var dirtyBlock: (start: Int, tail: Int, toEnd: Bool)?
         private let regionQueue = DispatchQueue(label: "co.liamo.mangle.highlight-region", qos: .userInitiated)
         /// Regions up to this size are highlighted synchronously (well under a frame);
-        /// larger ones go to a background queue.
-        private static let syncRegionLimit = 30_000
+        /// larger ones go to a background queue. Whole-document passes (load, language or
+        /// theme change) get the higher limit, so a short document never shows uncoloured;
+        /// per-edit passes the lower one, so typing in a long line doesn't wait on it.
+        private static let syncDocumentLimit = 30_000
+        private static let syncEditLimit = 2_000
         
         func shouldHighlight(_ range: NSRange) -> Bool {
-            guard let storage = codeStorage, let language = storage.language else { return true }
+            guard let storage = codeStorage, let language = storage.language else { return false }
             let text = storage.string as NSString
             let len = text.length
-            let delimiters = Self.blockDelimiters(for: language)
-            guard !delimiters.isEmpty, len < 300_000 else { return true }
+            let delimiters = len < 300_000 ? Self.blockDelimiters(for: language) : []
             
             let isFullPass = range.location == 0 && range.length >= len
             var countsChanged = false
@@ -3014,18 +3032,14 @@ struct CustomTextEditor: NSViewRepresentable {
                 }
                 tokenCounts[d.open] = (open, close)
             }
-            if isFullPass {
-                dirtyBlock = nil
-                return true
-            }
-            let inside = delimiters.contains { blockOpener(before: range.location, open: $0.open, close: $0.close, in: text) != nil }
-            guard countsChanged || inside || dirtyBlock != nil else { return true }
             
-            let tail = len - NSMaxRange(range)
+            let toEnd = isFullPass || countsChanged
+            let start = isFullPass ? 0 : range.location
+            let tail = isFullPass ? 0 : len - NSMaxRange(range)
             if let pending = dirtyBlock {
-                dirtyBlock = (min(pending.start, range.location), min(pending.tail, tail), pending.toEnd || countsChanged)
+                dirtyBlock = (min(pending.start, start), min(pending.tail, tail), pending.toEnd || toEnd)
             } else {
-                dirtyBlock = (range.location, tail, countsChanged)
+                dirtyBlock = (start, tail, toEnd)
                 DispatchQueue.main.async { [weak self] in self?.flushDirtyBlock() }
             }
             return false
@@ -3094,22 +3108,25 @@ struct CustomTextEditor: NSViewRepresentable {
                 return true
             }
             
-            if region.length <= Self.syncRegionLimit {
+            let isWholeDocument = region.location == 0 && region.length == storage.length
+            if region.length <= (isWholeDocument ? Self.syncDocumentLimit : Self.syncEditLimit) {
                 if let highlighted = highlightr.highlight(code, as: language) { _ = apply(highlighted) }
                 return
             }
+            // Distance from the region's end to the document's end: stable under edits inside
+            // or before the region, so a retry can find the same span again.
+            let tail = storage.length - NSMaxRange(region)
             regionQueue.async { [weak self] in
                 guard let highlighted = highlightr.highlight(code, as: language) else { return }
                 DispatchQueue.main.async {
                     guard let self, !apply(highlighted) else { return }
-                    // The text changed while we were highlighting; retry over the same span
-                    // (to the end of the document, since its end may have moved).
+                    // The text changed while we were highlighting; retry over the same span.
                     let len = storage.length
                     let start = min(region.location, len)
                     if let pending = self.dirtyBlock {
-                        self.dirtyBlock = (min(pending.start, start), 0, true)
+                        self.dirtyBlock = (min(pending.start, start), min(pending.tail, tail), pending.toEnd)
                     } else {
-                        self.dirtyBlock = (start, 0, true)
+                        self.dirtyBlock = (start, tail, false)
                         DispatchQueue.main.async { [weak self] in self?.flushDirtyBlock() }
                     }
                 }
@@ -3346,8 +3363,7 @@ private struct DocumentFormatMenu: View {
             }
         } label: {
             Text("\(status.indentation.label) · \(status.lineEnding.rawValue)")
-                .font(.caption)
-                .foregroundColor(.secondary)
+                .font(.system(size: 11))
         }
         .menuStyle(.borderlessButton)
         .fixedSize()
@@ -3359,9 +3375,9 @@ private struct CursorPositionLabel: View {
     @ObservedObject var status: EditorStatus
     
     var body: some View {
-        Text("\(status.cursorLine):\(status.cursorColumn)")
-            .font(.system(size: 12).monospacedDigit())
-            .foregroundColor(AppTheme.tealSUI)
+        Text("Ln \(status.cursorLine), Col \(status.cursorColumn)")
+            .font(.system(size: 11).monospacedDigit())
+            .foregroundColor(.secondary)
             .fixedSize()
     }
 }
@@ -3382,12 +3398,12 @@ private struct TextStatsLabel: View {
         HStack(spacing: 3) {
             Text("\(value)")
                 .monospacedDigit()
-                .foregroundColor(AppTheme.tealSUI)
+                .foregroundColor(.primary.opacity(0.7))
                 .frame(minWidth: valueWidth, alignment: .trailing)
             Text(label)
-                .foregroundColor(.secondary)
+                .foregroundColor(.secondary.opacity(0.7))
         }
-        .font(.caption)
+        .font(.system(size: 11))
     }
 }
 

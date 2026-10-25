@@ -44,7 +44,33 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     
     func applicationDidFinishLaunching(_ notification: Notification) {
         AppDelegate.shared = self
-        
+
+        // Two copies (say an Xcode build and the installed app) both receive the global
+        // hotkeys, so each would open its own editor. The newest launch takes over — but only
+        // once the old copy has exited, so its unsaved draft and history are on disk before
+        // we read them and its hotkeys are free to register.
+        let others = Bundle.main.bundleIdentifier.map {
+            NSRunningApplication.runningApplications(withBundleIdentifier: $0)
+                .filter { $0 != NSRunningApplication.current }
+        } ?? []
+        guard !others.isEmpty else {
+            finishLaunching()
+            return
+        }
+        others.forEach { $0.terminate() }
+        let deadline = Date().addingTimeInterval(3)
+        func waitForExit() {
+            if others.allSatisfy(\.isTerminated) || Date() >= deadline {
+                historyManager.reload()
+                finishLaunching()
+            } else {
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { waitForExit() }
+            }
+        }
+        waitForExit()
+    }
+
+    private func finishLaunching() {
         if let draft = EditorDraft.load() {
             pendingDraft = draft
             clipboardChangeCountOnHide = draft.clipboardChangeCount
@@ -918,7 +944,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         let font = NSFont.systemFont(ofSize: 12, weight: .medium)
         
         // Measure text
-        let attrs: [NSAttributedString.Key: Any] = [.font: font, .foregroundColor: NSColor.white]
+        let attrs: [NSAttributedString.Key: Any] = [.font: font, .foregroundColor: AppTheme.onTeal]
         let textSize = (message as NSString).size(withAttributes: attrs)
         let width  = ceil(textSize.width)  + hPad * 2
         let height = ceil(textSize.height) + vPad * 2
@@ -949,7 +975,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         let label = NSTextField(frame: NSRect(x: hPad, y: vPad, width: ceil(textSize.width), height: ceil(textSize.height)))
         label.stringValue = message
         label.font = font
-        label.textColor = .white
+        label.textColor = AppTheme.onTeal
         label.isBezeled = false
         label.isEditable = false
         label.isSelectable = false
@@ -960,10 +986,20 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         
         panel.contentView = container
         
-        // Position top-right with margin
-        let margin: CGFloat = 16
-        let x = screen.visibleFrame.maxX - width  - margin
-        let y = screen.visibleFrame.maxY - height - margin
+        // Top-right of the editor/history window while one is showing (below its title
+        // bar); top-right of the screen otherwise, e.g. after Save has closed the editor.
+        let x: CGFloat
+        let y: CGFloat
+        if let window = [editorWindow, historyWindow].compactMap({ $0 }).first(where: { $0.isVisible }) {
+            let margin: CGFloat = 12
+            let contentTop = window.frame.minY + window.contentLayoutRect.maxY
+            x = window.frame.maxX - width - margin
+            y = contentTop - height - margin
+        } else {
+            let margin: CGFloat = 16
+            x = screen.visibleFrame.maxX - width  - margin
+            y = screen.visibleFrame.maxY - height - margin
+        }
         panel.setFrameOrigin(NSPoint(x: x, y: y))
         
         panel.alphaValue = 0
