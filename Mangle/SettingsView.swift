@@ -102,6 +102,12 @@ class SettingsManager: ObservableObject {
             UserDefaults.standard.set(useTabs, forKey: useTabsKey)
         }
     }
+    /// Pressing ⌘C twice quickly in any app opens the editor with what was copied.
+    @Published var doubleCopyOpensEditor: Bool {
+        didSet {
+            UserDefaults.standard.set(doubleCopyOpensEditor, forKey: doubleCopyKey)
+        }
+    }
     @Published var darkTheme: String {
         didSet {
             UserDefaults.standard.set(darkTheme, forKey: darkThemeKey)
@@ -129,6 +135,7 @@ class SettingsManager: ObservableObject {
     private let wordWrapKey = "WordWrap"
     private let editorFontKey = "EditorFontName"
     private let useTabsKey = "UseTabs"
+    private let doubleCopyKey = "DoubleCopyOpensEditor"
     private let darkThemeKey = "DarkTheme"
     private let lightThemeKey = "LightTheme"
 
@@ -169,6 +176,7 @@ class SettingsManager: ObservableObject {
         editorFont = storedFontName.flatMap(EditorFont.init(rawValue:)) ?? .system
         
         useTabs = UserDefaults.standard.bool(forKey: "UseTabs")
+        doubleCopyOpensEditor = UserDefaults.standard.object(forKey: "DoubleCopyOpensEditor") as? Bool ?? true
         darkTheme = UserDefaults.standard.string(forKey: "DarkTheme") ?? Self.defaultDarkTheme
         lightTheme = UserDefaults.standard.string(forKey: "LightTheme") ?? Self.defaultLightTheme
     }
@@ -285,6 +293,7 @@ struct SettingsView: View {
     @State private var tabSize: Int
     @State private var editorFont: EditorFont
     @State private var useTabs: Bool
+    @State private var doubleCopyOpensEditor: Bool
     @State private var darkTheme: String
     @State private var lightTheme: String
     
@@ -297,6 +306,7 @@ struct SettingsView: View {
         _tabSize = State(initialValue: settings.tabSize)
         _editorFont = State(initialValue: settings.editorFont)
         _useTabs = State(initialValue: settings.useTabs)
+        _doubleCopyOpensEditor = State(initialValue: settings.doubleCopyOpensEditor)
         _darkTheme = State(initialValue: settings.darkTheme)
         _lightTheme = State(initialValue: settings.lightTheme)
     }
@@ -307,6 +317,14 @@ struct SettingsView: View {
                 .font(.headline)
             
             VStack(spacing: 12) {
+                HStack {
+                    Text("Press ⌘C Twice to Edit")
+                    Spacer()
+                    Toggle("", isOn: $doubleCopyOpensEditor)
+                        .labelsHidden()
+                }
+                .help("Copy, then press ⌘C again quickly to open the copied text in the editor. Requires Accessibility access.")
+                Divider()
                 ShortcutRecorder(title: "Quick Edit", shortcut: $editorShortcut)
                 ShortcutRecorder(title: "Show History", shortcut: $historyShortcut)
             }
@@ -452,6 +470,7 @@ struct SettingsView: View {
                     settings.tabSize = tabSize
                     settings.editorFont = editorFont
                     settings.useTabs = useTabs
+                    settings.doubleCopyOpensEditor = doubleCopyOpensEditor
                     settings.darkTheme = darkTheme
                     settings.lightTheme = lightTheme
                     settings.save()
@@ -465,7 +484,7 @@ struct SettingsView: View {
             .padding(.bottom, 20)
         }
         .padding()
-        .frame(width: 350, height: 700)
+        .frame(width: 350, height: 750)
         .tint(AppTheme.tealSUI)
     }
     

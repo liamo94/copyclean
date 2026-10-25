@@ -35,6 +35,9 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     /// Unsaved editor text from the previous run, restored by the next hotkey press when
     /// there's no new selection or clipboard content (same rules as a hidden editor).
     private var pendingDraft: EditorDraft?
+    /// Global monitor for the ⌘C ⌘C trigger (see `updateDoubleCopyMonitor`).
+    private var doubleCopyMonitor: Any?
+    private var lastCopyPress: Date = .distantPast
     
     func applicationDidFinishLaunching(_ notification: Notification) {
         AppDelegate.shared = self
@@ -48,6 +51,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         SettingsManager.shared.onShortcutsChanged = { [weak self] in
             self?.reregisterHotkeys()
             self?.updateMenuShortcuts()
+            self?.updateDoubleCopyMonitor()
         }
         
         // Listen for clear-history requests from Settings UI
@@ -58,6 +62,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         
         // Register global hotkeys
         registerGlobalHotkey()
+        updateDoubleCopyMonitor()
         
         // Create menu bar icon
         setupMenuBar()
@@ -132,6 +137,10 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationWillTerminate(_ notification: Notification) {
         historyManager.flush()
         saveDraft()
+        if let monitor = doubleCopyMonitor {
+            NSEvent.removeMonitor(monitor)
+            doubleCopyMonitor = nil
+        }
         if let monitor = keyEventMonitor {
             NSEvent.removeMonitor(monitor)
             keyEventMonitor = nil
@@ -190,6 +199,81 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         saveDraft()
     }
     
+    // MARK: - ⌘C ⌘C trigger
+    
+    /// Installs or removes the global key monitor for ⌘C ⌘C. Global monitors only see
+    /// other apps' key events and only receive them once Accessibility access is granted,
+    /// which the app already asks for — no extra permission needed.
+    func updateDoubleCopyMonitor() {
+        let enabled = SettingsManager.shared.doubleCopyOpensEditor
+        if enabled, doubleCopyMonitor == nil {
+            doubleCopyMonitor = NSEvent.addGlobalMonitorForEvents(matching: .keyDown) { [weak self] event in
+                self?.handleGlobalKeyDown(event)
+            }
+        } else if !enabled, let monitor = doubleCopyMonitor {
+            NSEvent.removeMonitor(monitor)
+            doubleCopyMonitor = nil
+        }
+        // A monitor installed before Accessibility was granted may never receive events;
+        // once access arrives, reinstall it.
+        if enabled, !AXIsProcessTrusted() {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 2) { [weak self] in
+                guard let self else { return }
+                if AXIsProcessTrusted() {
+                    if let monitor = self.doubleCopyMonitor { NSEvent.removeMonitor(monitor) }
+                    self.doubleCopyMonitor = nil
+                }
+                self.updateDoubleCopyMonitor()
+            }
+        }
+    }
+    
+    private static let doubleCopyInterval: TimeInterval = 0.4
+    
+    private func handleGlobalKeyDown(_ event: NSEvent) {
+        let mods = event.modifierFlags.intersection([.command, .shift, .option, .control])
+        // Match the character, not the key code, so ⌘C works on non-QWERTY layouts.
+        guard mods == .command, !event.isARepeat,
+              event.charactersIgnoringModifiers?.lowercased() == "c" else {
+            lastCopyPress = .distantPast
+            return
+        }
+        let now = Date()
+        if now.timeIntervalSince(lastCopyPress) <= Self.doubleCopyInterval {
+            lastCopyPress = .distantPast   // a third press starts a new pair
+            openEditorFromDoubleCopy()
+        } else {
+            lastCopyPress = now
+        }
+    }
+    
+    /// The second ⌘C is still being handled by the source app, so wait (briefly) for the
+    /// pasteboard to update before reading it.
+    private func openEditorFromDoubleCopy() {
+        let pasteboard = NSPasteboard.general
+        let changeCountAtPress = pasteboard.changeCount
+        let deadline = Date().addingTimeInterval(0.15)
+        func finish() {
+            guard let text = pasteboard.string(forType: .string), !text.isEmpty else {
+                showToast("Nothing to edit — copy some text first")
+                return
+            }
+            rememberFrontmostApp()
+            closeHistory()
+            editorViewModel.load(text)
+            editorViewModel.sourceEntryID = nil
+            presentEditorWindow()
+        }
+        func poll() {
+            if pasteboard.changeCount != changeCountAtPress || Date() >= deadline {
+                finish()
+            } else {
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.01) { poll() }
+            }
+        }
+        poll()
+    }
+    
     private func rememberFrontmostApp() {
         if let app = NSWorkspace.shared.frontmostApplication, app != NSRunningApplication.current {
             previousApp = app
@@ -235,7 +319,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         let contentView = SettingsView()
         
         let window = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 350, height: 700),
+            contentRect: NSRect(x: 0, y: 0, width: 350, height: 750),
             styleMask: [.titled, .closable],
             backing: .buffered,
             defer: false
