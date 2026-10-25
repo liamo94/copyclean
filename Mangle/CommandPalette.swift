@@ -74,8 +74,11 @@ struct CommandPaletteView: View {
                     ScrollView {
                         LazyVStack(spacing: 0) {
                             ForEach(Array(results.enumerated()), id: \.element.id) { index, cmd in
+                                // Identity comes from the command (ForEach's id). Also tagging rows
+                                // with .id(index) made the lazy stack treat "row 0" as the same view
+                                // whatever command it held, so filtered results and the selection
+                                // highlight never redrew.
                                 row(cmd, selected: index == selectedIndex)
-                                    .id(index)
                                     .contentShape(Rectangle())
                                     .onTapGesture { onRun(cmd) }
                             }
@@ -84,7 +87,7 @@ struct CommandPaletteView: View {
                     }
                     .frame(maxHeight: 300)
                     .onChange(of: selectedIndex) { _, index in
-                        proxy.scrollTo(index)
+                        if results.indices.contains(index) { proxy.scrollTo(results[index].id) }
                     }
                 }
             }
