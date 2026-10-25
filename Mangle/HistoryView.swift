@@ -3,10 +3,14 @@ import AppKit
 import Highlightr
 
 
-private func formatRelativeDate(_ date: Date, style: RelativeDateTimeFormatter.UnitsStyle = .full) -> String {
+private let abbreviatedRelativeFormatter: RelativeDateTimeFormatter = {
     let formatter = RelativeDateTimeFormatter()
-    formatter.unitsStyle = style
-    return formatter.localizedString(for: date, relativeTo: Date())
+    formatter.unitsStyle = .abbreviated
+    return formatter
+}()
+
+private func formatRelativeDate(_ date: Date) -> String {
+    abbreviatedRelativeFormatter.localizedString(for: date, relativeTo: Date())
 }
 
 struct HistoryView: View {
@@ -23,19 +27,23 @@ struct HistoryView: View {
     @State private var lastTapTime: Date = .distantPast
     @State private var keyMonitor: Any? = nil
     @FocusState private var searchFocused: Bool
+    @Environment(\.colorScheme) private var colorScheme
     
+    /// Filters and orders entries. Callers compute this once and pass it along — it used to
+    /// be a computed property re-evaluated (filter + sort) at every use during a render.
     private var filteredEntries: [HistoryEntry] {
         let base = searchText.isEmpty
         ? historyManager.entries
         : historyManager.entries.filter { $0.text.localizedCaseInsensitiveContains(searchText) }
-        // Pinned entries always shown first
-        return base.sorted { ($0.isPinned ? 0 : 1) < ($1.isPinned ? 0 : 1) }
+        // Pinned entries first, otherwise keeping recency order (stable, unlike sorted(by:))
+        return base.filter(\.isPinned) + base.filter { !$0.isPinned }
     }
     
     var body: some View {
-        VStack(spacing: 0) {
+        let entries = filteredEntries
+        return VStack(spacing: 0) {
             HStack(spacing: 0) {
-                sidebar
+                sidebar(entries: entries)
                 Divider()
                 detailPane
             }
@@ -90,16 +98,17 @@ struct HistoryView: View {
         HStack(spacing: 0) {
             // Left: timestamp + stats
             if let entry = selectedEntry {
+                let meta = historyManager.meta(for: entry)
                 HStack(spacing: 10) {
-                    Text(formatRelativeDate(entry.timestamp, style: .abbreviated))
+                    Text(formatRelativeDate(entry.timestamp))
                         .foregroundColor(.secondary)
                         .font(.system(size: 12))
                     
                     barDivider
                     
-                    statPill("\(entry.text.components(separatedBy: "\n").count)", label: "lines")
-                    statPill("\(entry.text.split { $0.isWhitespace || $0.isNewline }.count)", label: "words")
-                    statPill("\(entry.text.count)", label: "chars")
+                    statPill("\(meta.lines)", label: "lines")
+                    statPill("\(meta.words)", label: "words")
+                    statPill("\(meta.chars)", label: "chars")
                 }
                 .padding(.horizontal, 14)
             } else {
@@ -209,13 +218,13 @@ struct HistoryView: View {
     
     // MARK: - Sidebar
     
-    private var sidebar: some View {
+    private func sidebar(entries: [HistoryEntry]) -> some View {
         VStack(spacing: 0) {
             searchBar
             
             Divider()
             
-            if filteredEntries.isEmpty {
+            if entries.isEmpty {
                 emptyState(
                     icon: searchText.isEmpty ? "doc.text" : "magnifyingglass",
                     title: searchText.isEmpty ? "No History" : "No Results",
@@ -224,9 +233,9 @@ struct HistoryView: View {
             } else {
                 ScrollViewReader { proxy in
                     List(selection: $selectedEntry) {
-                        ForEach(filteredEntries) { entry in
+                        ForEach(entries) { entry in
                             let isSelected = selectedEntry?.id == entry.id
-                            HistoryEntryRow(entry: entry, isSelected: isSelected)
+                            HistoryEntryRow(entry: entry, meta: historyManager.meta(for: entry), isSelected: isSelected)
                                 .contentShape(Rectangle())
                                 .onTapGesture {
                                     NSApp.keyWindow?.makeFirstResponder(nil)
@@ -257,8 +266,7 @@ struct HistoryView: View {
                         }
                         .onDelete { indexSet in
                             for index in indexSet {
-                                let entry = filteredEntries[index]
-                                deleteEntry(entry)
+                                deleteEntry(entries[index])
                             }
                         }
                     }
@@ -304,9 +312,10 @@ struct HistoryView: View {
     @ViewBuilder
     private var detailPane: some View {
         if let entry = selectedEntry {
-            let lang = entry.language ?? CustomTextEditor.Coordinator.guessLanguage(entry.text)
-            SyntaxPreviewView(text: entry.text, language: lang)
-                .id(entry.id)
+            let lang = entry.language ?? historyManager.meta(for: entry).detectedLanguage
+            // No .id(entry.id): recreating the view per selection built a fresh Highlightr
+            // (a new JS context evaluating ~1 MB of highlight.js) on every arrow key.
+            SyntaxPreviewView(entryID: entry.id, text: entry.text, language: lang, isDark: colorScheme == .dark)
         } else {
             emptyState(
                 icon: "sidebar.left",
@@ -381,23 +390,12 @@ struct HistoryView: View {
 
 struct HistoryEntryRow: View {
     let entry: HistoryEntry
+    let meta: HistoryEntryMeta
     var isSelected: Bool = false
     
-    private var preview: String {
-        let lines = entry.text.split(separator: "\n", omittingEmptySubsequences: true)
-        if let first = lines.first { return String(first.drop(while: { $0 == " " || $0 == "\t" }).prefix(60)) }
-        return entry.text.prefix(60).trimmingCharacters(in: .whitespacesAndNewlines)
-    }
-    
-    private var secondLine: String? {
-        let lines = entry.text.split(separator: "\n", omittingEmptySubsequences: true)
-        guard lines.count > 1, let second = lines.dropFirst().first else { return nil }
-        return String(second.drop(while: { $0 == " " || $0 == "\t" }).prefix(60))
-    }
-    
-    private var detectedLanguage: String {
-        entry.language ?? CustomTextEditor.Coordinator.guessLanguage(entry.text)
-    }
+    private var preview: String { meta.preview }
+    private var secondLine: String? { meta.secondLine }
+    private var detectedLanguage: String { entry.language ?? meta.detectedLanguage }
     
     private var languageLabel: String {
         switch detectedLanguage {
@@ -432,7 +430,7 @@ struct HistoryEntryRow: View {
                 Circle()
                     .fill(AppTheme.tealSUI.opacity(isSelected ? 0.9 : 0.4))
                     .frame(width: 5, height: 5)
-                Text(formatRelativeDate(entry.timestamp, style: .abbreviated))
+                Text(formatRelativeDate(entry.timestamp))
                     .font(.caption2)
                     .foregroundColor(.secondary)
                 if !languageLabel.isEmpty {
@@ -456,30 +454,42 @@ struct HistoryEntryRow: View {
 // MARK: - Syntax Preview
 
 struct SyntaxPreviewView: NSViewRepresentable {
+    let entryID: UUID
     let text: String
     let language: String
+    let isDark: Bool
+    
+    /// One highlighter shared by every preview — creating a Highlightr evaluates ~1 MB of
+    /// highlight.js in a fresh JSContext (~20ms), far too slow to do per selection.
+    private static let sharedHighlightr: Highlightr? = {
+        let h = Highlightr()
+        h?.theme.setCodeFont(.monospacedSystemFont(ofSize: 12, weight: .regular))
+        return h
+    }()
+    
     
     class Coordinator {
-        var highlightr: Highlightr?
-        var codeStorage: CodeAttributedString?
+        let codeStorage: NSTextStorage
+        var shownEntryID: UUID?
+        var shownLanguage: String?
+        var appliedTheme: String?
         
         init() {
-            guard let h = Highlightr() else { return }
-            let isDark = NSApp.effectiveAppearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
-            h.setTheme(to: isDark ? "atom-one-dark" : "xcode")
-            h.theme.setCodeFont(.monospacedSystemFont(ofSize: 12, weight: .regular))
-            self.highlightr = h
-            self.codeStorage = CodeAttributedString(highlightr: h)
+            if let h = SyntaxPreviewView.sharedHighlightr {
+                codeStorage = CodeAttributedString(highlightr: h)
+            } else {
+                codeStorage = NSTextStorage()
+            }
         }
     }
     
     func makeCoordinator() -> Coordinator { Coordinator() }
     
     func makeNSView(context: Context) -> NSScrollView {
-        let coordinator = context.coordinator
-        let textStorage = coordinator.codeStorage ?? NSTextStorage()
+        let textStorage = context.coordinator.codeStorage
         
         let layoutManager = NSLayoutManager()
+        layoutManager.allowsNonContiguousLayout = true
         textStorage.addLayoutManager(layoutManager)
         
         let textContainer = NSTextContainer(size: NSSize(width: 0, height: CGFloat.greatestFiniteMagnitude))
@@ -494,30 +504,49 @@ struct SyntaxPreviewView: NSViewRepresentable {
         textView.autoresizingMask = NSView.AutoresizingMask.width
         textView.isAutomaticQuoteSubstitutionEnabled = false
         
-        let isDark = NSApp.effectiveAppearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
-        if isDark, let bg = coordinator.highlightr?.theme.themeBackgroundColor {
-            textView.backgroundColor = bg
-        }
-        
         let scrollView = NSScrollView()
         scrollView.documentView = textView
         scrollView.hasVerticalScroller = true
         scrollView.autohidesScrollers = true
-        if isDark, let bg = coordinator.highlightr?.theme.themeBackgroundColor {
-            scrollView.backgroundColor = bg
-        }
-        
         return scrollView
     }
     
     func updateNSView(_ scrollView: NSScrollView, context: Context) {
-        guard let storage = context.coordinator.codeStorage else {
-            (scrollView.documentView as? NSTextView)?.string = text
+        let coordinator = context.coordinator
+        guard let textView = scrollView.documentView as? NSTextView else { return }
+        
+        let theme = SettingsManager.shared.themeName(isDark: isDark)
+        let themeChanged = coordinator.appliedTheme != theme
+        if themeChanged, let h = Self.sharedHighlightr {
+            coordinator.appliedTheme = theme
+            h.setTheme(to: theme)
+            h.theme.setCodeFont(.monospacedSystemFont(ofSize: 12, weight: .regular))
+            let bg = h.theme.themeBackgroundColor ?? .textBackgroundColor
+            textView.backgroundColor = bg
+            scrollView.backgroundColor = bg
+        }
+        
+        guard let storage = coordinator.codeStorage as? CodeAttributedString else {
+            if coordinator.shownEntryID != entryID {
+                coordinator.shownEntryID = entryID
+                textView.string = text
+            }
             return
         }
-        let lang = language == "plaintext" ? "plaintext" : language
-        if storage.language != lang { storage.language = lang }
-        storage.replaceCharacters(in: NSRange(location: 0, length: storage.length), with: text)
-        scrollView.documentView?.scroll(.zero)
+        // Huge entries: plain text, for the same reason as the editor.
+        let lang = text.utf16.count > 1_000_000 ? "plaintext" : language
+        if coordinator.shownEntryID != entryID {
+            coordinator.shownEntryID = entryID
+            coordinator.shownLanguage = lang
+            // Swap text with highlighting off, then highlight once with the right language.
+            storage.language = nil
+            storage.replaceCharacters(in: NSRange(location: 0, length: storage.length), with: text)
+            storage.language = lang
+            textView.scroll(.zero)
+        } else if coordinator.shownLanguage != lang || themeChanged {
+            coordinator.shownLanguage = lang
+            storage.language = nil
+            storage.language = lang
+        }
     }
 }
