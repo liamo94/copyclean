@@ -66,9 +66,22 @@ class SettingsManager: ObservableObject {
     
     @Published var editorShortcut: KeyboardShortcut
     @Published var historyShortcut: KeyboardShortcut
+    @Published var scratchShortcut: KeyboardShortcut
     @Published var fontSize: CGFloat {
         didSet {
             UserDefaults.standard.set(Double(fontSize), forKey: fontSizeKey)
+        }
+    }
+    /// Font size while presenting — zooming in presentation mode changes this, not `fontSize`.
+    @Published var presentationFontSize: CGFloat {
+        didSet {
+            UserDefaults.standard.set(Double(presentationFontSize), forKey: presentationFontSizeKey)
+        }
+    }
+    /// Presentation mode switches to an accessible high-contrast syntax theme.
+    @Published var presentationHighContrast: Bool {
+        didSet {
+            UserDefaults.standard.set(presentationHighContrast, forKey: presentationHighContrastKey)
         }
     }
     @Published var pauseHistory: Bool {
@@ -121,13 +134,24 @@ class SettingsManager: ObservableObject {
     
     static let defaultDarkTheme = "atom-one-dark"
     static let defaultLightTheme = "xcode"
+    static let defaultPresentationFontSize: CGFloat = 24
+    static let presentationFontSizeRange: ClosedRange<CGFloat> = 14...72
     
-    func themeName(isDark: Bool) -> String { isDark ? darkTheme : lightTheme }
+    func themeName(isDark: Bool, presenting: Bool = false) -> String {
+        if presenting, presentationHighContrast {
+            let name = isDark ? "a11y-dark" : "a11y-light"
+            if ThemeCatalog.names.contains(name) { return name }
+        }
+        return isDark ? darkTheme : lightTheme
+    }
 
     var onShortcutsChanged: (() -> Void)?
 
     private let editorKey = "EditorShortcut"
     private let historyKey = "HistoryShortcut"
+    private let scratchKey = "ScratchShortcut"
+    private let presentationFontSizeKey = "PresentationFontSize"
+    private let presentationHighContrastKey = "PresentationHighContrast"
     private let pauseHistoryKey = "PauseHistory"
     private let fontSizeKey = "EditorFontSize"
     private let maxHistoryKey = "MaxHistory"
@@ -144,6 +168,8 @@ class SettingsManager: ObservableObject {
         let defaultEditor = KeyboardShortcut(keyCode: 14, modifiers: UInt32(controlKey | cmdKey))
         // Default: Ctrl+Cmd+H for history
         let defaultHistory = KeyboardShortcut(keyCode: 4, modifiers: UInt32(controlKey | cmdKey))
+        // Default: Ctrl+Cmd+N for a new scratch pad
+        let defaultScratch = KeyboardShortcut(keyCode: 45, modifiers: UInt32(controlKey | cmdKey))
         
         if let data = UserDefaults.standard.data(forKey: editorKey),
            let shortcut = try? JSONDecoder().decode(KeyboardShortcut.self, from: data) {
@@ -159,10 +185,20 @@ class SettingsManager: ObservableObject {
             historyShortcut = defaultHistory
         }
         
+        if let data = UserDefaults.standard.data(forKey: scratchKey),
+           let shortcut = try? JSONDecoder().decode(KeyboardShortcut.self, from: data) {
+            scratchShortcut = shortcut
+        } else {
+            scratchShortcut = defaultScratch
+        }
+        
         pauseHistory = UserDefaults.standard.bool(forKey: pauseHistoryKey)
         
         let storedFontSize = UserDefaults.standard.double(forKey: fontSizeKey)
         fontSize = storedFontSize > 0 ? CGFloat(storedFontSize) : NSFont.systemFontSize
+        let storedPresentationSize = UserDefaults.standard.double(forKey: presentationFontSizeKey)
+        presentationFontSize = storedPresentationSize > 0 ? CGFloat(storedPresentationSize) : Self.defaultPresentationFontSize
+        presentationHighContrast = UserDefaults.standard.object(forKey: presentationHighContrastKey) as? Bool ?? true
         
         let storedMax = UserDefaults.standard.integer(forKey: "MaxHistory")
         maxHistory = storedMax > 0 ? storedMax : 100
@@ -187,6 +223,9 @@ class SettingsManager: ObservableObject {
         }
         if let data = try? JSONEncoder().encode(historyShortcut) {
             UserDefaults.standard.set(data, forKey: historyKey)
+        }
+        if let data = try? JSONEncoder().encode(scratchShortcut) {
+            UserDefaults.standard.set(data, forKey: scratchKey)
         }
         onShortcutsChanged?()
     }
@@ -286,6 +325,7 @@ struct SettingsView: View {
     
     @State private var editorShortcut: KeyboardShortcut
     @State private var historyShortcut: KeyboardShortcut
+    @State private var scratchShortcut: KeyboardShortcut
     @State private var showClearConfirm = false
     @State private var maxHistory: Int
     // Edited locally and applied on Save, so Cancel discards them like it does the shortcuts.
@@ -296,11 +336,13 @@ struct SettingsView: View {
     @State private var doubleCopyOpensEditor: Bool
     @State private var darkTheme: String
     @State private var lightTheme: String
+    @State private var presentationHighContrast: Bool
     
     init() {
         let settings = SettingsManager.shared
         _editorShortcut = State(initialValue: settings.editorShortcut)
         _historyShortcut = State(initialValue: settings.historyShortcut)
+        _scratchShortcut = State(initialValue: settings.scratchShortcut)
         _maxHistory = State(initialValue: settings.maxHistory)
         _pauseHistory = State(initialValue: settings.pauseHistory)
         _tabSize = State(initialValue: settings.tabSize)
@@ -309,6 +351,7 @@ struct SettingsView: View {
         _doubleCopyOpensEditor = State(initialValue: settings.doubleCopyOpensEditor)
         _darkTheme = State(initialValue: settings.darkTheme)
         _lightTheme = State(initialValue: settings.lightTheme)
+        _presentationHighContrast = State(initialValue: settings.presentationHighContrast)
     }
     
     var body: some View {
@@ -327,6 +370,7 @@ struct SettingsView: View {
                 Divider()
                 ShortcutRecorder(title: "Quick Edit", shortcut: $editorShortcut)
                 ShortcutRecorder(title: "Show History", shortcut: $historyShortcut)
+                ShortcutRecorder(title: "New Scratch", shortcut: $scratchShortcut)
             }
             .padding()
             .background(Color(nsColor: .controlBackgroundColor))
@@ -428,6 +472,16 @@ struct SettingsView: View {
                     Spacer()
                     themePicker($lightTheme)
                 }
+                
+                Divider()
+                
+                HStack {
+                    Text("High Contrast When Presenting")
+                    Spacer()
+                    Toggle("", isOn: $presentationHighContrast)
+                        .labelsHidden()
+                }
+                .help("Presentation mode (⌥⌘P) switches to an accessible high-contrast theme")
 
                 Divider()
 
@@ -465,6 +519,7 @@ struct SettingsView: View {
                 Button("Save") {
                     settings.editorShortcut = editorShortcut
                     settings.historyShortcut = historyShortcut
+                    settings.scratchShortcut = scratchShortcut
                     settings.maxHistory = maxHistory
                     settings.pauseHistory = pauseHistory
                     settings.tabSize = tabSize
@@ -473,6 +528,7 @@ struct SettingsView: View {
                     settings.doubleCopyOpensEditor = doubleCopyOpensEditor
                     settings.darkTheme = darkTheme
                     settings.lightTheme = lightTheme
+                    settings.presentationHighContrast = presentationHighContrast
                     settings.save()
                     // Apply a lowered limit now rather than on the next copy.
                     AppDelegate.shared?.historyManager.enforceLimit(save: true)
@@ -484,7 +540,7 @@ struct SettingsView: View {
             .padding(.bottom, 20)
         }
         .padding()
-        .frame(width: 350, height: 750)
+        .frame(width: 350, height: 840)
         .tint(AppTheme.tealSUI)
     }
     

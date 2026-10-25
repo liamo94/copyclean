@@ -20,6 +20,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     var settingsWindow: NSWindow?
     var hotKeyRef: EventHotKeyRef?
     var historyHotKeyRef: EventHotKeyRef?
+    var scratchHotKeyRef: EventHotKeyRef?
     var editorViewModel = EditorViewModel()
     var historyManager = HistoryManager()
     var statusItem: NSStatusItem?
@@ -38,6 +39,8 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     /// Global monitor for the ⌘C ⌘C trigger (see `updateDoubleCopyMonitor`).
     private var doubleCopyMonitor: Any?
     private var lastCopyPress: Date = .distantPast
+    /// The editor's frame before presentation mode enlarged it.
+    private var frameBeforePresenting: NSRect?
     
     func applicationDidFinishLaunching(_ notification: Notification) {
         AppDelegate.shared = self
@@ -172,6 +175,10 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         editorItem.keyEquivalentModifierMask = settings.editorShortcut.cocoaModifiers
         menu.addItem(editorItem)
         
+        let scratchItem = NSMenuItem(title: "New Scratch", action: #selector(showScratch), keyEquivalent: settings.scratchShortcut.keyEquivalent)
+        scratchItem.keyEquivalentModifierMask = settings.scratchShortcut.cocoaModifiers
+        menu.addItem(scratchItem)
+        
         let historyItem = NSMenuItem(title: "Recent Snippets", action: #selector(showHistory), keyEquivalent: settings.historyShortcut.keyEquivalent)
         historyItem.keyEquivalentModifierMask = settings.historyShortcut.cocoaModifiers
         menu.addItem(historyItem)
@@ -185,16 +192,114 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     
     @objc func showEditorFromMenu() {
         rememberFrontmostApp()
+        let anchor = visibleWindowFrame()
         closeHistory()
         let text = (AXIsProcessTrusted() ? selectedTextFromFrontmostApp() : nil) ?? NSPasteboard.general.string(forType: .string) ?? ""
-        editorViewModel.load(text)
+        loadEditor(text)
         editorViewModel.sourceEntryID = nil
-        presentEditorWindow()
+        presentEditorWindow(replacing: anchor)
+    }
+    
+    // MARK: - Scratch pad
+    
+    /// The scratch shortcut: brings back an unfinished scratch pad, or opens a blank one.
+    /// Pressed while the scratch pad is frontmost, it hides it again.
+    @objc func showScratch() {
+        let vm = editorViewModel
+        if editorWindow?.isKeyWindow == true, vm.isScratch {
+            closeEditor()
+            return
+        }
+        rememberFrontmostApp()
+        let anchor = visibleWindowFrame()
+        closeHistory()
+        if editorWindow == nil, let draft = pendingDraft, draft.isScratch == true {
+            vm.restore(draft)
+            presentEditorWindow(replacing: anchor)
+            return
+        }
+        if editorWindow != nil, vm.isScratch, vm.isDirty {
+            restoreHiddenEditor(vm.text, replacing: anchor)
+            return
+        }
+        newScratch(replacing: anchor)
+    }
+    
+    /// Replaces the editor's contents with a blank scratch pad (⌘N), keeping any unsaved
+    /// text in history. Opens where the window already is, if one is showing.
+    func newScratch(replacing anchor: NSRect? = nil) {
+        let anchor = anchor ?? visibleWindowFrame()
+        stashEditorText(includingEdits: true)
+        editorViewModel.loadScratch()
+        presentEditorWindow(replacing: anchor)
+    }
+    
+    /// Loads text into the editor, keeping an unsaved scratch pad it replaces in history.
+    private func loadEditor(_ text: String, language: String? = nil) {
+        stashEditorText(includingEdits: false)
+        editorViewModel.load(text, language: language)
+    }
+    
+    /// Saves unsaved scratch text (and, with `includingEdits`, an unsaved edit of copied
+    /// text) to history before it's replaced, so starting something new never loses work.
+    private func stashEditorText(includingEdits: Bool) {
+        let vm = editorViewModel
+        let text: String
+        let isScratch: Bool
+        if editorWindow == nil, let draft = pendingDraft {
+            // Fresh launch: the previous run's draft hasn't been restored into the editor yet.
+            guard draft.isScratch == true || includingEdits else { return }
+            text = draft.text
+            isScratch = draft.isScratch == true
+        } else {
+            guard vm.isDirty, vm.isScratch || includingEdits else { return }
+            text = vm.text
+            isScratch = vm.isScratch
+        }
+        guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
+        if SettingsManager.shared.pauseHistory {
+            showToast("History is paused — previous text not kept")
+            return
+        }
+        historyManager.addEntry(text, isScratch: isScratch)
+        showToast(isScratch ? "Scratch saved to History" : "Previous edit saved to History")
+    }
+    
+    // MARK: - Presentation mode
+    
+    /// Large text and minimal chrome for showing something to others. The window grows to
+    /// most of the screen and stays up when another app is clicked.
+    func togglePresentation() {
+        guard let window = editorWindow else { return }
+        if editorViewModel.isPresenting {
+            endPresentation(animate: true)
+            return
+        }
+        frameBeforePresenting = window.frame
+        editorViewModel.isPresenting = true
+        // Normal level so the app being demoed can come in front; the editor stays behind it
+        // rather than hiding, and the hotkey brings it back.
+        window.level = .normal
+        let screen = (window.screen ?? screenAtCursor()).visibleFrame
+        let size = NSSize(width: (screen.width * 0.8).rounded(), height: (screen.height * 0.85).rounded())
+        let frame = NSRect(x: screen.midX - size.width / 2, y: screen.midY - size.height / 2, width: size.width, height: size.height)
+        window.setFrame(frame, display: true, animate: true)
+    }
+    
+    private func endPresentation(animate: Bool) {
+        guard editorViewModel.isPresenting else { return }
+        editorViewModel.isPresenting = false
+        editorWindow?.level = .floating
+        if let frame = frameBeforePresenting, let window = editorWindow {
+            window.setFrame(frame, display: true, animate: animate && window.isVisible)
+        }
+        frameBeforePresenting = nil
     }
     
     @objc func appDidResignActive() {
         clipboardChangeCountOnHide = NSPasteboard.general.changeCount
-        editorWindow?.orderOut(nil)
+        // While presenting, clicking another app (to run a demo) mustn't hide the editor.
+        if !editorViewModel.isPresenting { editorWindow?.orderOut(nil) }
         historyWindow?.orderOut(nil)
         saveDraft()
     }
@@ -259,10 +364,11 @@ class AppDelegate: NSObject, NSApplicationDelegate {
                 return
             }
             rememberFrontmostApp()
+            let anchor = visibleWindowFrame()
             closeHistory()
-            editorViewModel.load(text)
+            loadEditor(text)
             editorViewModel.sourceEntryID = nil
-            presentEditorWindow()
+            presentEditorWindow(replacing: anchor)
         }
         func poll() {
             if pasteboard.changeCount != changeCountAtPress || Date() >= deadline {
@@ -292,7 +398,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         EditorDraft(
             text: text, baseText: vm.baseText, language: vm.currentLanguage,
             languageIsManual: vm.languageIsManual, sourceEntryID: vm.sourceEntryID,
-            clipboardChangeCount: clipboardChangeCountOnHide
+            clipboardChangeCount: clipboardChangeCountOnHide, isScratch: vm.isScratch
         ).save()
     }
     
@@ -319,7 +425,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         let contentView = SettingsView()
         
         let window = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 350, height: 750),
+            contentRect: NSRect(x: 0, y: 0, width: 350, height: 840),
             styleMask: [.titled, .closable],
             backing: .buffered,
             defer: false
@@ -360,6 +466,8 @@ class AppDelegate: NSObject, NSApplicationDelegate {
                         appDelegate.showEditor()
                     } else if hotKeyID.id == 2 {
                         appDelegate.showHistory()
+                    } else if hotKeyID.id == 3 {
+                        appDelegate.showScratch()
                     }
                     
                     return noErr
@@ -384,6 +492,10 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             UnregisterEventHotKey(ref)
             historyHotKeyRef = nil
         }
+        if let ref = scratchHotKeyRef {
+            UnregisterEventHotKey(ref)
+            scratchHotKeyRef = nil
+        }
         registerHotkeys()
     }
     
@@ -405,26 +517,40 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         if status2 != noErr {
             DispatchQueue.main.async { self.showToast("⚠️ Show History shortcut conflict") }
         }
+        
+        var hotKeyID3 = EventHotKeyID()
+        hotKeyID3.signature = OSType("SCRT".fourCharCodeValue)
+        hotKeyID3.id = 3
+        let status3 = RegisterEventHotKey(settings.scratchShortcut.keyCode, settings.scratchShortcut.modifiers, hotKeyID3, GetApplicationEventTarget(), 0, &scratchHotKeyRef)
+        if status3 != noErr {
+            DispatchQueue.main.async { self.showToast("⚠️ New Scratch shortcut conflict") }
+        }
     }
     
     @objc func showHistory() {
         rememberFrontmostApp()
         closeSettings()
         
+        // Leave presentation first, so history takes the editor's normal frame, not the
+        // enlarged one — and a hidden editor isn't left in presentation mode.
+        endPresentation(animate: false)
+        
         // If we have a preserved history window (user was editing a history entry),
         // restore it rather than starting fresh
+        let anchor = visibleWindowFrame()
         if let hw = historyWindow {
             editorWindow?.orderOut(nil)
             NSRunningApplication.current.activate(options: [.activateAllWindows, .activateIgnoringOtherApps])
             hw.makeKeyAndOrderFront(nil)
+            if let anchor { place(hw, replacing: anchor) }
             return
         }
         
         closeEditor()
-        createHistoryWindow()
+        createHistoryWindow(replacing: anchor)
     }
     
-    func createHistoryWindow() {
+    func createHistoryWindow(replacing anchor: NSRect? = nil) {
         let contentView = HistoryView(
             historyManager: historyManager,
             onSelectEntry: { [weak self] entry in
@@ -442,7 +568,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             defer: false
         )
         
-        positionWindowNearCursor(window)
+        place(window, replacing: anchor)
         window.title = "Recent Snippets"
         window.identifier = NSUserInterfaceItemIdentifier("history")
         window.contentView = NSHostingView(rootView: contentView)
@@ -488,12 +614,12 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     }
     
     func loadEntryToEditor(_ entry: HistoryEntry) {
-        editorViewModel.load(entry.text, language: entry.language)
+        loadEditor(entry.text, language: entry.language)
         editorViewModel.sourceEntryID = entry.id
         // Hide but don't destroy — closing the editor returns here
-        let origin = historyWindow?.frame.origin
+        let anchor = historyWindow?.frame
         historyWindow?.orderOut(nil)
-        presentEditorWindow(at: origin)
+        presentEditorWindow(replacing: anchor)
     }
     
     func closeHistory() {
@@ -510,20 +636,22 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             return
         }
         rememberFrontmostApp()
+        let anchor = visibleWindowFrame()
         
         // If we were editing a history entry, restore the editor for that entry
         if historyWindow != nil && editorViewModel.sourceEntryID != nil {
             historyWindow?.orderOut(nil)
             NSRunningApplication.current.activate(options: [.activateAllWindows, .activateIgnoringOtherApps])
             editorWindow?.makeKeyAndOrderFront(nil)
+            if let anchor, let window = editorWindow { place(window, replacing: anchor) }
             return
         }
         
         // If history is open (fresh, no entry being edited), close it and open editor from clipboard
         if historyWindow != nil {
             closeHistory()
-            editorViewModel.load(NSPasteboard.general.string(forType: .string) ?? "")
-            presentEditorWindow()
+            loadEditor(NSPasteboard.general.string(forType: .string) ?? "")
+            presentEditorWindow(replacing: anchor)
             return
         }
         
@@ -534,8 +662,8 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         
         // Try AX first — instant, no side effects
         if AXIsProcessTrusted(), let selected = selectedTextFromFrontmostApp(), !selected.isEmpty {
-            editorViewModel.load(selected)
-            presentEditorWindow()
+            loadEditor(selected)
+            presentEditorWindow(replacing: anchor)
             return
         }
         
@@ -543,10 +671,10 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         guard AXIsProcessTrusted() else {
             let clipboard = NSPasteboard.general.string(forType: .string) ?? ""
             if let old = hiddenContent, NSPasteboard.general.changeCount == clipboardChangeCountOnHide {
-                restoreHiddenEditor(old)
+                restoreHiddenEditor(old, replacing: anchor)
             } else {
-                editorViewModel.load(clipboard)
-                presentEditorWindow()
+                loadEditor(clipboard)
+                presentEditorWindow(replacing: anchor)
             }
             return
         }
@@ -572,10 +700,10 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             let gotNewText = pasteboard.changeCount != savedChangeCount && !newText.isEmpty && newText != previousText
             if let old = hiddenContent, !gotNewText {
                 // Nothing new from Cmd+C either — restore unsaved content
-                restoreHiddenEditor(old)
+                restoreHiddenEditor(old, replacing: anchor)
             } else {
-                editorViewModel.load(gotNewText ? newText : previousText)
-                presentEditorWindow()
+                loadEditor(gotNewText ? newText : previousText)
+                presentEditorWindow(replacing: anchor)
             }
         }
         func poll() {
@@ -608,20 +736,18 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         return text
     }
     
-    private func presentEditorWindow(at origin: NSPoint? = nil) {
+    /// Shows the editor in place of `anchor` (the frame of a Mangle window that was on
+    /// screen), or near the cursor when nothing was showing.
+    private func presentEditorWindow(replacing anchor: NSRect? = nil) {
         closeSettings()
         
         if let window = editorWindow {
             NSRunningApplication.current.activate(options: [.activateAllWindows, .activateIgnoringOtherApps])
             window.makeKeyAndOrderFront(nil)
             // Position after makeKeyAndOrderFront so our placement overrides any macOS window restoration
-            if let origin = origin {
-                window.setFrameOrigin(origin)
-            } else {
-                positionWindowNearCursor(window)
-            }
+            if !editorViewModel.isPresenting { place(window, replacing: anchor) }
         } else {
-            createEditorWindow(at: origin)
+            createEditorWindow(replacing: anchor)
         }
         focusEditorTextView()
         // Anything shown now supersedes a draft from the previous run.
@@ -646,13 +772,17 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
     
-    func createEditorWindow(at origin: NSPoint? = nil) {
+    func createEditorWindow(replacing anchor: NSRect? = nil) {
         let contentView = EditorView(viewModel: editorViewModel, onSave: { [weak self] in
             self?.saveToClipboard()
         }, onSaveAndPaste: { [weak self] in
             self?.saveAndPaste()
         }, onClose: { [weak self] in
             self?.closeEditor()
+        }, onNewScratch: { [weak self] in
+            self?.newScratch()
+        }, onTogglePresentation: { [weak self] in
+            self?.togglePresentation()
         })
         
         let window = NSWindow(
@@ -662,11 +792,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             defer: false
         )
         
-        if let origin = origin {
-            window.setFrameOrigin(origin)
-        } else {
-            positionWindowNearCursor(window)
-        }
+        place(window, replacing: anchor)
         window.title = "Mangle"
         window.contentView = NSHostingView(rootView: contentView)
         window.level = .floating
@@ -728,7 +854,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         
         // Save to history (unless paused)
         if !SettingsManager.shared.pauseHistory {
-            historyManager.addEntry(editorViewModel.text)
+            historyManager.addEntry(editorViewModel.text, isScratch: editorViewModel.isScratch)
         }
         
         editorViewModel.sourceEntryID = nil
@@ -748,6 +874,23 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         let sf = screen.visibleFrame
         let wf = window.frame
         window.setFrameOrigin(NSPoint(x: sf.midX - wf.width / 2, y: sf.midY - wf.height / 2))
+    }
+    
+    /// The frame of whichever editor/history window is on screen, so the next one can open
+    /// in its place instead of jumping to the cursor.
+    private func visibleWindowFrame() -> NSRect? {
+        [editorWindow, historyWindow].compactMap { $0 }.first { $0.isVisible }?.frame
+    }
+    
+    /// Puts `window` where `anchor` was (top-left corners aligned, since the windows differ
+    /// in size), or near the cursor when there's no anchor.
+    private func place(_ window: NSWindow, replacing anchor: NSRect?) {
+        guard let anchor else {
+            positionWindowNearCursor(window)
+            return
+        }
+        guard anchor != window.frame else { return }
+        window.setFrameTopLeftPoint(NSPoint(x: anchor.minX, y: anchor.maxY))
     }
     
     private func positionWindowNearCursor(_ window: NSWindow) {
@@ -843,22 +986,24 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     
     /// Re-show the hidden editor as-is. It still holds the unsaved text, so there's nothing to
     /// reload — reloading used to reset the dirty baseline, cursor position and undo history.
-    private func restoreHiddenEditor(_ text: String) {
+    private func restoreHiddenEditor(_ text: String, replacing anchor: NSRect? = nil) {
         guard let window = editorWindow else {
             // Fresh launch: restore the previous run's unsaved draft.
             if let draft = pendingDraft {
                 editorViewModel.restore(draft)
-                presentEditorWindow()
+                presentEditorWindow(replacing: anchor)
             }
             return
         }
         NSRunningApplication.current.activate(options: [.activateAllWindows, .activateIgnoringOtherApps])
         window.makeKeyAndOrderFront(nil)
-        positionWindowNearCursor(window)
+        if !editorViewModel.isPresenting { place(window, replacing: anchor) }
         focusEditorTextView()
     }
     
     func closeEditor() {
+        endPresentation(animate: false)
+        let anchor = editorWindow?.isVisible == true ? editorWindow?.frame : nil
         editorWindow?.orderOut(nil)
         // Cancelling an edit ends the history→editor context, so clear the source reference.
         // This ensures the next editor open is treated as fresh (cursor-positioned) rather
@@ -867,6 +1012,8 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         if let hw = historyWindow {
             NSRunningApplication.current.activate(options: [.activateAllWindows, .activateIgnoringOtherApps])
             hw.makeKeyAndOrderFront(nil)
+            // Back to history in the editor's place, in case the editor was moved.
+            if let anchor { place(hw, replacing: anchor) }
         }
     }
     

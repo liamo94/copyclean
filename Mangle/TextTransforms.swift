@@ -620,3 +620,191 @@ nonisolated enum TextTransforms {
         return score * 100 / max(c.count, 1) + score
     }
 }
+
+// MARK: - Code Folding
+
+/// A multi-line `{…}` or `[…]` block that can be folded.
+nonisolated struct FoldRegion: Equatable {
+    let opener: Int
+    let closer: Int
+    /// 1-based line of the opening bracket.
+    let line: Int
+    /// Bracket nesting depth, 0 for the outermost blocks.
+    let depth: Int
+
+    /// The hidden text: everything between the brackets, so a folded line reads `"items": [⋯]`.
+    var foldRange: NSRange { NSRange(location: opener + 1, length: closer - opener - 1) }
+}
+
+nonisolated enum FoldScanner {
+    /// Bigger documents aren't scanned — they'd cost a noticeable pause per edit.
+    static let maxLength = 2_000_000
+
+    /// Bracket blocks spanning more than one line, sorted by opener. Brackets inside
+    /// double-quoted strings are skipped when `skipStrings` is set (code, not prose).
+    static func regions(in text: NSString, skipStrings: Bool) -> [FoldRegion] {
+        let length = text.length
+        guard length > 0, length <= maxLength else { return [] }
+        var result: [FoldRegion] = []
+        var stack: [(bracket: unichar, index: Int, line: Int)] = []
+        var line = 1
+        var inString = false
+        var escaped = false
+        let chunk = 4096
+        var location = 0
+        withUnsafeTemporaryAllocation(of: unichar.self, capacity: chunk) { buf in
+            guard let base = buf.baseAddress else { return }
+            while location < length {
+                let n = min(chunk, length - location)
+                text.getCharacters(base, range: NSRange(location: location, length: n))
+                for i in 0..<n {
+                    let c = base[i]
+                    if c == 10 {
+                        line += 1
+                        // Strings don't span lines; an unterminated quote must not swallow the rest.
+                        inString = false
+                        escaped = false
+                        continue
+                    }
+                    if inString {
+                        if escaped { escaped = false }
+                        else if c == 92 { escaped = true }       // backslash
+                        else if c == 34 { inString = false }     // "
+                        continue
+                    }
+                    switch c {
+                    case 34 where skipStrings:
+                        inString = true
+                    case 123, 91: // { [
+                        stack.append((c, location + i, line))
+                    case 125, 93: // } ]
+                        let opener: unichar = c == 125 ? 123 : 91
+                        if let k = stack.lastIndex(where: { $0.bracket == opener }) {
+                            let open = stack[k]
+                            stack.removeSubrange(k...)
+                            if line > open.line {
+                                result.append(FoldRegion(opener: open.index, closer: location + i, line: open.line, depth: k))
+                            }
+                        }
+                    default:
+                        break
+                    }
+                }
+                location += n
+            }
+        }
+        return result.sorted { $0.opener < $1.opener }
+    }
+
+    /// The single block wrapping the whole document (a JSON object or array), if there is one.
+    static func root(of regions: [FoldRegion], in text: NSString) -> FoldRegion? {
+        let top = regions.filter { $0.depth == 0 }
+        guard top.count == 1, let region = top.first else { return nil }
+        let ws = CharacterSet.whitespacesAndNewlines
+        let before = text.substring(to: region.opener)
+        let after = text.substring(from: region.closer + 1)
+        guard before.trimmingCharacters(in: ws).isEmpty, after.trimmingCharacters(in: ws).isEmpty else { return nil }
+        return region
+    }
+}
+
+// MARK: - JSON Path
+
+nonisolated extension TextTransforms {
+    /// The path to the JSON value at `location`, e.g. `data.users[0].email`. Empty at the root.
+    /// Scans tolerantly up to the caret, so it works on documents that don't fully parse.
+    static func jsonPath(in text: NSString, at location: Int) -> String {
+        enum Container {
+            case object(key: String?)
+            case array(index: Int, hasValue: Bool)
+        }
+        var stack: [Container] = []
+        var expectingKey = false
+        let length = text.length
+        let end = min(max(location, 0), length)
+
+        func markValue() {
+            if case .array(let index, _) = stack.last { stack[stack.count - 1] = .array(index: index, hasValue: true) }
+        }
+
+        var i = 0
+        scan: while i < length {
+            let c = text.character(at: i)
+            if i >= end {
+                // The caret sits just before this character: it counts only if it starts a key or value.
+                switch c {
+                case 34: break
+                case 32, 9, 10, 13, 44, 58, 93, 125: break scan
+                default: markValue(); break scan
+                }
+            }
+            switch c {
+            case 34: // a string: read it whole, even past the caret, so a key under the caret counts
+                var j = i + 1
+                var escaped = false
+                while j < length {
+                    let d = text.character(at: j)
+                    if escaped { escaped = false }
+                    else if d == 92 { escaped = true }
+                    else if d == 34 || d == 10 { break }
+                    j += 1
+                }
+                if expectingKey, case .object = stack.last {
+                    let raw = text.substring(with: NSRange(location: i + 1, length: max(j - i - 1, 0)))
+                    let key = (try? JSONSerialization.jsonObject(with: Data("\"\(raw)\"".utf8), options: .fragmentsAllowed) as? String) ?? raw
+                    stack[stack.count - 1] = .object(key: key)
+                } else {
+                    markValue()
+                }
+                if j >= end { break scan }
+                i = j + 1
+                continue
+            case 123: // {
+                markValue()
+                stack.append(.object(key: nil))
+                expectingKey = true
+            case 91: // [
+                markValue()
+                stack.append(.array(index: 0, hasValue: false))
+                expectingKey = false
+            case 125, 93: // } ]
+                if !stack.isEmpty { stack.removeLast() }
+                expectingKey = false
+            case 58: // :
+                expectingKey = false
+            case 44: // ,
+                switch stack.last {
+                case .object?:
+                    stack[stack.count - 1] = .object(key: nil)
+                    expectingKey = true
+                case .array(let index, _)?:
+                    stack[stack.count - 1] = .array(index: index + 1, hasValue: false)
+                case nil:
+                    break
+                }
+            case 32, 9, 10, 13:
+                break
+            default:
+                markValue()
+            }
+            i += 1
+        }
+
+        var path = ""
+        for container in stack {
+            switch container {
+            case .object(let key?):
+                if key.range(of: #"^[A-Za-z_$][A-Za-z0-9_$]*$"#, options: .regularExpression) != nil {
+                    path += path.isEmpty ? key : "." + key
+                } else {
+                    path += "[\"" + escapeJSONString(key) + "\"]"
+                }
+            case .array(let index, true):
+                path += "[\(index)]"
+            case .object(nil), .array(_, false):
+                return path
+            }
+        }
+        return path
+    }
+}

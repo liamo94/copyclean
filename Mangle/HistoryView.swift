@@ -427,6 +427,12 @@ struct HistoryEntryRow: View {
                         .font(.system(size: 9))
                         .foregroundColor(AppTheme.tealSUI)
                 }
+                if entry.isScratch {
+                    Image(systemName: "square.and.pencil")
+                        .font(.system(size: 9))
+                        .foregroundColor(.secondary)
+                        .help("Saved from a scratch pad")
+                }
                 Circle()
                     .fill(AppTheme.tealSUI.opacity(isSelected ? 0.9 : 0.4))
                     .frame(width: 5, height: 5)

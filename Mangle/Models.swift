@@ -8,16 +8,19 @@ struct HistoryEntry: Identifiable, Codable, Hashable {
     var timestamp: Date
     var isPinned: Bool
     var language: String? // nil = auto-detect; set when user manually picks a language
+    /// Saved from a scratch pad rather than copied.
+    var isScratch: Bool
 
-    init(id: UUID = UUID(), text: String, timestamp: Date = Date(), isPinned: Bool = false, language: String? = nil) {
+    init(id: UUID = UUID(), text: String, timestamp: Date = Date(), isPinned: Bool = false, language: String? = nil, isScratch: Bool = false) {
         self.id = id
         self.text = text
         self.timestamp = timestamp
         self.isPinned = isPinned
         self.language = language
+        self.isScratch = isScratch
     }
 
-    // Custom decoder for backwards compatibility – isPinned/language may be absent in old data
+    // Custom decoder for backwards compatibility – isPinned/language/isScratch may be absent in old data
     init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         id        = try container.decode(UUID.self,   forKey: .id)
@@ -25,6 +28,7 @@ struct HistoryEntry: Identifiable, Codable, Hashable {
         timestamp = try container.decode(Date.self,   forKey: .timestamp)
         isPinned  = (try container.decodeIfPresent(Bool.self,   forKey: .isPinned)) ?? false
         language  =  try container.decodeIfPresent(String.self, forKey: .language)
+        isScratch = (try container.decodeIfPresent(Bool.self,   forKey: .isScratch)) ?? false
     }
 
     // Hashable conformance
@@ -83,7 +87,7 @@ class HistoryManager: ObservableObject {
         return meta
     }
 
-    func addEntry(_ text: String) {
+    func addEntry(_ text: String, isScratch: Bool = false) {
         guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
 
         // Deduplicate against the whole list, not just the most recent entry — copying
@@ -98,7 +102,7 @@ class HistoryManager: ObservableObject {
             return
         }
 
-        let entry = HistoryEntry(text: text)
+        let entry = HistoryEntry(text: text, isScratch: isScratch)
         entries.insert(entry, at: 0)
         enforceLimit()
         saveHistory()
@@ -239,6 +243,11 @@ class EditorViewModel: ObservableObject {
     var baseText: String = ""
     var languageIsManual: Bool = false  // true when user explicitly picked a language
     var sourceEntryID: UUID? = nil      // set when editing an existing history entry
+    /// A blank scratch pad rather than an edit of copied text: closing it doesn't ask to
+    /// discard, and its text is kept in history when something replaces it.
+    @Published private(set) var isScratch = false
+    /// Large text, minimal chrome, and the window stays up when the app loses focus.
+    @Published var isPresenting = false
     let status = EditorStatus()
     weak var textView: NSTextView?
 
@@ -264,7 +273,15 @@ class EditorViewModel: ObservableObject {
                 ? "plaintext"
                 : CustomTextEditor.Coordinator.guessLanguage(newText)
         }
+        isScratch = false
         loadGeneration += 1
+    }
+    
+    /// Starts an empty scratch pad.
+    func loadScratch() {
+        load("")
+        sourceEntryID = nil
+        isScratch = true
     }
 
     /// Mark the current text as saved.
@@ -284,6 +301,7 @@ class EditorViewModel: ObservableObject {
         load(draft.text, language: draft.languageIsManual ? draft.language : nil)
         baseText = draft.baseText
         sourceEntryID = draft.sourceEntryID
+        isScratch = draft.isScratch ?? false
     }
 }
 
@@ -295,6 +313,7 @@ struct EditorDraft: Codable {
     let languageIsManual: Bool
     let sourceEntryID: UUID?
     let clipboardChangeCount: Int
+    let isScratch: Bool?
     
     private static var url: URL {
         FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]

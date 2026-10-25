@@ -47,12 +47,43 @@ enum EditorFont: String, CaseIterable, Identifiable, Hashable {
 
 class LineNumberRulerView: NSRulerView {
     var fontSize: CGFloat = NSFont.systemFontSize { didSet { if fontSize != oldValue { updateThickness() } } }
+    /// Off while presenting: the gutter then only holds fold chevrons.
+    var showsLineNumbers = true { didSet { if showsLineNumbers != oldValue { updateThickness() } } }
     var activeLine: Int = 0
     private var digitCount = 1
-    private var thickness: CGFloat = 44
+    private var thickness: CGFloat = 52
+    /// Fold chevrons for unfolded blocks only show while the pointer is over the gutter.
+    private var isHovering = false { didSet { if isHovering != oldValue { needsDisplay = true } } }
+    private static let foldColumnWidth: CGFloat = 16
     
     override var isFlipped: Bool { true }
     override var requiredThickness: CGFloat { thickness }
+    
+    override func updateTrackingAreas() {
+        super.updateTrackingAreas()
+        trackingAreas.forEach(removeTrackingArea)
+        addTrackingArea(NSTrackingArea(rect: .zero, options: [.mouseEnteredAndExited, .activeInKeyWindow, .inVisibleRect], owner: self))
+    }
+    
+    override func mouseEntered(with event: NSEvent) { isHovering = true }
+    override func mouseExited(with event: NSEvent) { isHovering = false }
+    
+    /// Clicking the fold column (or anywhere, when line numbers are hidden) toggles the
+    /// block that opens on that line.
+    override func mouseDown(with event: NSEvent) {
+        guard let textView = clientView as? MangleTextView,
+              let layoutManager = textView.layoutManager,
+              let container = textView.textContainer else { return }
+        let point = convert(event.locationInWindow, from: nil)
+        guard !showsLineNumbers || point.x >= bounds.width - Self.foldColumnWidth - 4 else { return }
+        let y = point.y + textView.visibleRect.origin.y - textView.textContainerInset.height
+        let length = (textView.string as NSString).length
+        guard length > 0, y >= 0 else { return }
+        let glyph = layoutManager.glyphIndex(for: NSPoint(x: 1, y: y), in: container)
+        let char = min(layoutManager.characterIndexForGlyph(at: glyph), length - 1)
+        let lineStart = (textView.string as NSString).lineRange(for: NSRange(location: char, length: 0)).location
+        textView.toggleFold(onLine: textView.lineNumber(at: lineStart))
+    }
     
     /// Widen the gutter once line numbers need more digits than the default width fits.
     func setLineCount(_ count: Int) {
@@ -65,7 +96,9 @@ class LineNumberRulerView: NSRulerView {
     private func updateThickness() {
         let font = NSFont.monospacedSystemFont(ofSize: fontSize * 0.85, weight: .semibold)
         let digitWidth = ("8" as NSString).size(withAttributes: [.font: font]).width
-        let newThickness = max(44, ceil(CGFloat(digitCount) * digitWidth + 22))
+        let newThickness = showsLineNumbers
+            ? max(52, ceil(CGFloat(digitCount) * digitWidth + 12 + Self.foldColumnWidth))
+            : Self.foldColumnWidth + 8
         guard newThickness != thickness else { return }
         thickness = newThickness
         scrollView?.tile()
@@ -73,23 +106,35 @@ class LineNumberRulerView: NSRulerView {
     }
     
     override func drawHashMarksAndLabels(in rect: NSRect) {
-        guard let textView = clientView as? NSTextView,
+        guard let textView = clientView as? MangleTextView,
               let layoutManager = textView.layoutManager,
               let container = textView.textContainer else { return }
         
         let isDark = effectiveAppearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
         // Derived from the editor background so the gutter suits whichever syntax theme is active.
         let editorBG = textView.backgroundColor.usingColorSpace(.deviceRGB) ?? textView.backgroundColor
-        (editorBG.blended(withFraction: isDark ? 0.18 : 0.04, of: .black)
-            ?? (isDark ? AppTheme.gutterDarkBG : NSColor(white: 0.95, alpha: 1.0))).setFill()
-        bounds.fill()
+        if showsLineNumbers {
+            (editorBG.blended(withFraction: isDark ? 0.18 : 0.04, of: .black)
+                ?? (isDark ? AppTheme.gutterDarkBG : NSColor(white: 0.95, alpha: 1.0))).setFill()
+            bounds.fill()
+            
+            (isDark ? AppTheme.teal.withAlphaComponent(0.45) : AppTheme.teal.withAlphaComponent(0.25)).setStroke()
+            let border = NSBezierPath()
+            border.move(to: NSPoint(x: bounds.width - 0.5, y: bounds.minY))
+            border.line(to: NSPoint(x: bounds.width - 0.5, y: bounds.maxY))
+            border.lineWidth = 1
+            border.stroke()
+        } else {
+            // Presenting: blend into the editor.
+            editorBG.setFill()
+            bounds.fill()
+        }
         
-        (isDark ? AppTheme.teal.withAlphaComponent(0.45) : AppTheme.teal.withAlphaComponent(0.25)).setStroke()
-        let border = NSBezierPath()
-        border.move(to: NSPoint(x: bounds.width - 0.5, y: bounds.minY))
-        border.line(to: NSPoint(x: bounds.width - 0.5, y: bounds.maxY))
-        border.lineWidth = 1
-        border.stroke()
+        // Chevrons only show on hover, for folded lines, or while presenting — don't rescan
+        // the document on every keystroke's redraw otherwise.
+        let showsChevrons = isHovering || !showsLineNumbers || !textView.folds.isEmpty
+        let (foldRegions, foldByLine) = showsChevrons ? textView.foldRegions(allowingStale: true) : ([], [:])
+        let chevronColor = AppTheme.teal.withAlphaComponent(isDark ? 0.7 : 0.8)
         
         let inactiveAttrs: [NSAttributedString.Key: Any] = [
             .font: NSFont.monospacedSystemFont(ofSize: fontSize * 0.85, weight: .regular),
@@ -112,15 +157,25 @@ class LineNumberRulerView: NSRulerView {
         // Read scroll position directly from the text view — always current at draw time.
         let scrollOffset = textView.visibleRect.origin.y
 
-        func drawNum(_ n: Int, _ docY: CGFloat) {
+        func drawNum(_ n: Int, _ docY: CGFloat, lineHeight: CGFloat = 0) {
             // docY is layout-manager space. Add inset → text-view/document space.
             // Subtract scrollOffset → position relative to the ruler's visible top.
             let y = docY + inset - scrollOffset
             guard y > -20 && y < h + 20 else { return }
             let attrs = n == activeLine ? activeAttrs : inactiveAttrs
-            let s  = "\(n)" as NSString
-            let sz = s.size(withAttributes: attrs)
-            s.draw(at: NSPoint(x: width - sz.width - 10, y: y), withAttributes: attrs)
+            if showsLineNumbers {
+                let s  = "\(n)" as NSString
+                let sz = s.size(withAttributes: attrs)
+                s.draw(at: NSPoint(x: width - sz.width - Self.foldColumnWidth - 2, y: y), withAttributes: attrs)
+            }
+            if let index = foldByLine[n] {
+                let folded = textView.isFolded(foldRegions[index])
+                if folded || isHovering || !showsLineNumbers {
+                    let height = lineHeight > 0 ? lineHeight : fontSize * 1.2
+                    drawChevron(folded: folded, centerX: width - Self.foldColumnWidth / 2 - 2, centerY: y + height / 2,
+                                color: folded ? AppTheme.teal : chevronColor)
+                }
+            }
         }
 
         if len == 0 { drawNum(1, 0); return }
@@ -138,17 +193,24 @@ class LineNumberRulerView: NSRulerView {
         var lineStart = 0
         text.getLineStart(&lineStart, end: nil, contentsEnd: nil, for: NSRange(location: visibleCharRange.location, length: 0))
 
-        var lineNum = (textView as? MangleTextView)?.lineNumber(at: lineStart)
-            ?? text.countNewlines(in: NSRange(location: 0, length: lineStart)) + 1
+        var lineNum = textView.lineNumber(at: lineStart)
 
         let visibleEnd = min(visibleCharRange.location + visibleCharRange.length, len)
         var charIdx = lineStart
         while charIdx < len {
+            // Lines merged into a folded line above get no number; skip to after the fold.
+            if let fold = textView.fold(hidingLineStart: charIdx) {
+                let closerLine = text.lineRange(for: NSRange(location: NSMaxRange(fold), length: 0))
+                lineNum += 1 + text.countNewlines(in: NSRange(location: charIdx, length: max(closerLine.location - charIdx, 0)))
+                charIdx = NSMaxRange(closerLine)
+                if charIdx > visibleEnd { break }
+                continue
+            }
             let lineRange = text.lineRange(for: NSRange(location: charIdx, length: 0))
             let glyphIdx  = layoutManager.glyphIndexForCharacter(at: charIdx)
             if glyphIdx < layoutManager.numberOfGlyphs {
                 let fragRect = layoutManager.lineFragmentRect(forGlyphAt: glyphIdx, effectiveRange: nil)
-                if fragRect != .zero { drawNum(lineNum, fragRect.origin.y) }
+                if fragRect != .zero { drawNum(lineNum, fragRect.origin.y, lineHeight: fragRect.height) }
             }
             lineNum += 1
             charIdx = NSMaxRange(lineRange)
@@ -159,6 +221,25 @@ class LineNumberRulerView: NSRulerView {
             let extra = layoutManager.extraLineFragmentRect
             if extra != .zero { drawNum(lineNum, extra.origin.y) }
         }
+    }
+    
+    private func drawChevron(folded: Bool, centerX: CGFloat, centerY: CGFloat, color: NSColor) {
+        let r = max(2.5, fontSize * 0.22)
+        let path = NSBezierPath()
+        if folded {   // ›
+            path.move(to: NSPoint(x: centerX - r / 2, y: centerY - r))
+            path.line(to: NSPoint(x: centerX + r / 2, y: centerY))
+            path.line(to: NSPoint(x: centerX - r / 2, y: centerY + r))
+        } else {      // ⌄ (flipped view: +y is down)
+            path.move(to: NSPoint(x: centerX - r, y: centerY - r / 2))
+            path.line(to: NSPoint(x: centerX, y: centerY + r / 2))
+            path.line(to: NSPoint(x: centerX + r, y: centerY - r / 2))
+        }
+        path.lineWidth = 1.5
+        path.lineCapStyle = .round
+        path.lineJoinStyle = .round
+        color.setStroke()
+        path.stroke()
     }
 }
 
@@ -205,6 +286,8 @@ struct EditorView: View {
     var onSave: () -> Void
     var onSaveAndPaste: () -> Void = {}
     var onClose: () -> Void
+    var onNewScratch: () -> Void = {}
+    var onTogglePresentation: () -> Void = {}
     @Environment(\.colorScheme) private var colorScheme
     @State private var keyMonitor: Any?
     @State private var textView: NSTextView?
@@ -250,6 +333,8 @@ struct EditorView: View {
 
 
     @State private var needsAccessibility = !AXIsProcessTrusted()
+    /// "Presenting · ⌥⌘P to exit", shown briefly on entering presentation mode.
+    @State private var showPresentingHint = false
     
     private static let languages: [(label: String, id: String)] = [
         ("Auto-detect", "auto"),
@@ -282,7 +367,7 @@ struct EditorView: View {
     
     var body: some View {
         VStack(spacing: 0) {
-            if needsAccessibility {
+            if needsAccessibility && !viewModel.isPresenting {
                 accessibilityBanner
             }
             if showFindBar {
@@ -294,12 +379,13 @@ struct EditorView: View {
                 text: viewModel.loadedText,
                 loadGeneration: viewModel.loadGeneration,
                 language: viewModel.currentLanguage,
-                fontSize: settings.fontSize,
+                fontSize: viewModel.isPresenting ? settings.presentationFontSize : settings.fontSize,
                 editorFont: settings.editorFont,
                 wordWrap: settings.wordWrap,
                 isDark: colorScheme == .dark,
-                themeName: settings.themeName(isDark: colorScheme == .dark),
+                themeName: settings.themeName(isDark: colorScheme == .dark, presenting: viewModel.isPresenting),
                 status: viewModel.status,
+                isPresenting: viewModel.isPresenting,
                 onTextViewReady: { tv in
                     textView = tv
                     viewModel.textView = tv
@@ -307,12 +393,34 @@ struct EditorView: View {
                 onTextChange: {
                     // Keep find highlights/count in sync with edits (debounced by the editor).
                     if showFindBar { highlightMatches() }
-                }
+                },
+                onPasteReplacedDocument: redetectLanguageAfterPaste
             )
             
-            Divider()
-            
-            bottomBar
+            if !viewModel.isPresenting {
+                Divider()
+                bottomBar
+            }
+        }
+        .overlay(alignment: .bottomTrailing) {
+            if showPresentingHint {
+                Text("Presenting · ⌥⌘P or Esc to exit")
+                    .font(.system(size: 12, weight: .medium))
+                    .foregroundColor(.secondary)
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 5)
+                    .background(.regularMaterial, in: Capsule())
+                    .padding(14)
+                    .transition(.opacity)
+                    .allowsHitTesting(false)
+            }
+        }
+        .onChange(of: viewModel.isPresenting) {
+            withAnimation(.easeOut(duration: 0.2)) { showPresentingHint = viewModel.isPresenting }
+            guard viewModel.isPresenting else { return }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 2.5) {
+                withAnimation(.easeOut(duration: 0.4)) { showPresentingHint = false }
+            }
         }
         .frame(minWidth: 400, minHeight: 320)
         .background {
@@ -327,6 +435,11 @@ struct EditorView: View {
                 .keyboardShortcut("f", modifiers: .command)
                 Button("") { onSaveAndPaste() }
                     .keyboardShortcut(.return, modifiers: .command)
+                // The bottom bar (and its ⌘S button) is hidden while presenting.
+                if viewModel.isPresenting {
+                    Button("") { onSave() }
+                        .keyboardShortcut("s", modifiers: .command)
+                }
             }
             .hidden()
         }
@@ -412,6 +525,11 @@ struct EditorView: View {
                     closeFindBar()
                     return nil
                 }
+                // Then it leaves presentation mode, like leaving full screen.
+                if event.keyCode == 53, viewModel.isPresenting {
+                    onTogglePresentation()
+                    return nil
+                }
 
                 // These shortcuts mutate the main document; while Find/Replace has focus,
                 // let the key fall through to the field instead (e.g. don't duplicate a
@@ -427,6 +545,8 @@ struct EditorView: View {
                 if mods == .command, key == "k" { openPalette(); return nil }
                 if mods == [.command, .shift], key == "p" { openPalette(); return nil }
                 if mods == .control, key == "g" { openPalette(query: ":"); return nil }
+                if mods == .command, key == "n" { onNewScratch(); return nil }
+                if mods == [.command, .option], key == "p" { onTogglePresentation(); return nil }
                 
                 if !editingFieldFocused {
                     if mods == .command, key == "e" { useSelectionForFind(); return nil }
@@ -434,18 +554,25 @@ struct EditorView: View {
                     if mods == [.command, .shift], key == "d" { if let tv = textView { duplicateLine(in: tv) }; return nil }
                     if mods == [.control, .command], key == "g" { mtv?.selectAllOccurrences(); return nil }
                     if mods == .option, event.keyCode == 6 { settings.wordWrap.toggle(); return nil } // ⌥Z
+                    if mods == [.command, .option, .shift], key == "c" { copyJSONPath(); return nil }
+                    // Folding: ⌥⌘← / ⌥⌘→ at the caret, with ⇧ for everything.
+                    if event.keyCode == 123 || event.keyCode == 124 {
+                        let fold = event.keyCode == 123
+                        if mods == [.command, .option] { fold ? mtv?.foldAtCaret() : mtv?.unfoldAtCaret(); return nil }
+                        if mods == [.command, .option, .shift] { fold ? mtv?.foldAll() : mtv?.unfoldAll(); return nil }
+                    }
                 }
 
                 if mods == .command {
                     switch event.charactersIgnoringModifiers {
                     case "=", "+":
-                        settings.fontSize = min(settings.fontSize + 1, 36)
+                        zoom(by: 1)
                         return nil
                     case "-":
-                        settings.fontSize = max(settings.fontSize - 1, 9)
+                        zoom(by: -1)
                         return nil
                     case "0":
-                        settings.fontSize = NSFont.systemFontSize
+                        resetZoom()
                         return nil
                     case "d":
                         guard !editingFieldFocused else { break }
@@ -825,17 +952,19 @@ struct EditorView: View {
             
             barDivider
             
-            // Feature 3 – Cancel with unsaved-changes guard
+            // Feature 3 – Cancel with unsaved-changes guard. A scratch pad just hides: its
+            // text comes back with the scratch shortcut, and goes to history when replaced.
             Button {
                 closeFindBar()
-                if viewModel.isDirty {
+                if viewModel.isDirty && !viewModel.isScratch {
                     showCancelAlert = true
                 } else {
                     onClose()
                 }
             } label: {
-                bottomAction("Cancel", shortcut: "Esc", hovered: hoverCancel)
+                bottomAction(viewModel.isScratch ? "Hide" : "Cancel", shortcut: "Esc", hovered: hoverCancel)
             }
+            .help(viewModel.isScratch ? "Hide the scratch pad — it comes back where you left it" : "")
             .buttonStyle(.plain)
             .keyboardShortcut(.escape, modifiers: [])
             .padding(.horizontal, 8)
@@ -1314,7 +1443,25 @@ struct EditorView: View {
         var commands: [EditorCommand] = [
             EditorCommand(title: "Save to Clipboard", section: "File", shortcut: "⌘S", run: onSave),
             EditorCommand(title: "Save and Paste", section: "File", shortcut: "⌘↩", run: onSaveAndPaste),
-            EditorCommand(title: "Revert to Original", section: "File", isEnabled: viewModel.isDirty, run: revertToOriginal),
+            EditorCommand(title: "Revert to Original", section: "File", isEnabled: viewModel.isDirty && !viewModel.isScratch, run: revertToOriginal),
+            EditorCommand(title: "New Scratch", section: "File", shortcut: "⌘N", run: onNewScratch),
+            EditorCommand(title: "Discard Scratch", section: "File", isEnabled: viewModel.isScratch) {
+                closeFindBar()
+                onClose()
+                viewModel.discard()
+            },
+            EditorCommand(title: viewModel.isPresenting ? "Stop Presenting" : "Start Presenting", section: "View", shortcut: "⌥⌘P",
+                          run: onTogglePresentation),
+            EditorCommand(title: "Fold", section: "Folding", shortcut: "⌥⌘←") { mtv?.foldAtCaret() },
+            EditorCommand(title: "Unfold", section: "Folding", shortcut: "⌥⌘→") { mtv?.unfoldAtCaret() },
+            EditorCommand(title: "Fold All", section: "Folding", shortcut: "⌥⇧⌘←") { mtv?.foldAll() },
+            EditorCommand(title: "Unfold All", section: "Folding", shortcut: "⌥⇧⌘→") { mtv?.unfoldAll() },
+            EditorCommand(title: "Collapse to Depth 1", section: "Folding") { mtv?.collapse(toDepth: 1) },
+            EditorCommand(title: "Collapse to Depth 2", section: "Folding") { mtv?.collapse(toDepth: 2) },
+            EditorCommand(title: "Collapse to Depth 3", section: "Folding") { mtv?.collapse(toDepth: 3) },
+            EditorCommand(title: "Collapse to Depth 4", section: "Folding") { mtv?.collapse(toDepth: 4) },
+            EditorCommand(title: "Copy JSON Path", section: "JSON", shortcut: "⌥⇧⌘C",
+                          isEnabled: viewModel.currentLanguage == "json", run: copyJSONPath),
             EditorCommand(title: "Find", section: "Find", shortcut: "⌘F") {
                 showFindBar = true
                 isFindFieldFocused = true
@@ -1335,9 +1482,9 @@ struct EditorView: View {
             EditorCommand(title: "Move Line Up", section: "Edit", shortcut: "⌥↑") { if let tv = textView { moveLine(in: tv, up: true) } },
             EditorCommand(title: "Move Line Down", section: "Edit", shortcut: "⌥↓") { if let tv = textView { moveLine(in: tv, up: false) } },
             EditorCommand(title: settings.wordWrap ? "Turn Off Word Wrap" : "Turn On Word Wrap", section: "View", shortcut: "⌥Z") { settings.wordWrap.toggle() },
-            EditorCommand(title: "Zoom In", section: "View", shortcut: "⌘=") { settings.fontSize = min(settings.fontSize + 1, 36) },
-            EditorCommand(title: "Zoom Out", section: "View", shortcut: "⌘−") { settings.fontSize = max(settings.fontSize - 1, 9) },
-            EditorCommand(title: "Reset Zoom", section: "View", shortcut: "⌘0") { settings.fontSize = NSFont.systemFontSize },
+            EditorCommand(title: "Zoom In", section: "View", shortcut: "⌘=") { zoom(by: 1) },
+            EditorCommand(title: "Zoom Out", section: "View", shortcut: "⌘−") { zoom(by: -1) },
+            EditorCommand(title: "Reset Zoom", section: "View", shortcut: "⌘0", run: resetZoom),
             EditorCommand(title: "Indent Using Spaces (2)", section: "Indentation") { setIndentation(.spaces(2)) },
             EditorCommand(title: "Indent Using Spaces (4)", section: "Indentation") { setIndentation(.spaces(4)) },
             EditorCommand(title: "Indent Using Tabs", section: "Indentation") { setIndentation(.tabs) },
@@ -1417,6 +1564,51 @@ struct EditorView: View {
             t("Convert to CR", "Line Endings", scope: .document, TextTransforms.toCR),
         ]))
         return sections
+    }
+    
+    /// Zooms the editor, or the presentation size while presenting.
+    private func zoom(by step: CGFloat) {
+        if viewModel.isPresenting {
+            let range = SettingsManager.presentationFontSizeRange
+            settings.presentationFontSize = min(max(settings.presentationFontSize + step * 2, range.lowerBound), range.upperBound)
+        } else {
+            settings.fontSize = min(max(settings.fontSize + step, 9), 36)
+        }
+    }
+    
+    private func resetZoom() {
+        if viewModel.isPresenting {
+            settings.presentationFontSize = SettingsManager.defaultPresentationFontSize
+        } else {
+            settings.fontSize = NSFont.systemFontSize
+        }
+    }
+    
+    /// Copies the path to the JSON value under the caret, e.g. `data.users[0].email`.
+    private func copyJSONPath() {
+        guard let tv = textView else { return }
+        guard viewModel.currentLanguage == "json" else {
+            AppDelegate.shared?.showToast("Copy JSON Path needs a JSON document")
+            return
+        }
+        let path = TextTransforms.jsonPath(in: tv.string as NSString, at: tv.selectedRange().location)
+        guard !path.isEmpty else {
+            AppDelegate.shared?.showToast("At the top level — no path to copy")
+            return
+        }
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(path, forType: .string)
+        AppDelegate.shared?.showToast("Copied \(path.count > 60 ? String(path.prefix(57)) + "…" : path)")
+    }
+    
+    /// Pasting into an empty scratch pad (or over everything) re-detects the language and
+    /// indentation, unless the user picked a language themselves.
+    private func redetectLanguageAfterPaste() {
+        guard !viewModel.languageIsManual else { return }
+        let text = viewModel.text
+        let language = text.utf16.count > 1_000_000 ? "plaintext" : CustomTextEditor.Coordinator.guessLanguage(text)
+        if language != viewModel.currentLanguage { viewModel.currentLanguage = language }
+        if let indentation = Indentation.detect(in: text) { setIndentation(indentation) }
     }
     
     private func setLanguage(_ id: String) {
@@ -1660,10 +1852,38 @@ final class MangleTextView: NSTextView {
         return line
     }
     
-    /// Called for every character edit. Edits at/after the anchor don't change the
-    /// number of newlines before it, so the anchor stays valid.
-    func noteCharactersEdited(at location: Int) {
-        if location < lineAnchor.location { lineAnchor = (0, 1) }
+    /// Called for every character edit (`editedRange` is post-edit). Edits at/after the
+    /// anchor don't change the number of newlines before it, so the anchor stays valid.
+    func noteCharactersEdited(in editedRange: NSRange, changeInLength delta: Int) {
+        if editedRange.location < lineAnchor.location { lineAnchor = (0, 1) }
+        textVersion += 1
+        adjustFolds(forEditAt: editedRange, changeInLength: delta)
+    }
+    
+    // MARK: Folding state (logic in Folding.swift)
+    
+    /// Folded ranges — each is the text between a bracket pair. Nested folds are allowed.
+    var folds: [NSRange] = [] { didSet { visibleFolds = Self.outermostFolds(folds) } }
+    /// `folds` minus those inside another fold: sorted and disjoint.
+    private(set) var visibleFolds: [NSRange] = []
+    /// Skip brackets inside "strings" when finding foldable blocks (off for prose).
+    var foldSkipsStrings = true { didSet { if foldSkipsStrings != oldValue { regionCache = nil } } }
+    var textVersion = 0
+    var regionCache: (version: Int, regions: [FoldRegion], byLine: [Int: Int])?
+    var unfoldCheckPending = false
+    var foldRescanWork: DispatchWorkItem?
+    
+    // MARK: Paste
+    
+    /// Paste into an empty document, or over all of it — the editor re-detects the language.
+    var onPasteReplacedDocument: (() -> Void)?
+    
+    override func paste(_ sender: Any?) {
+        let length = (string as NSString).length
+        let replacesDocument = selectedRange() == NSRange(location: 0, length: length)
+            || string.allSatisfy(\.isWhitespace)
+        super.paste(sender)
+        if replacesDocument { onPasteReplacedDocument?() }
     }
     
     // MARK: Key interception (most reliable — fires before interpretKeyEvents)
@@ -1763,6 +1983,7 @@ final class MangleTextView: NSTextView {
         // Repaint just the old and new current-line bands.
         if let oldLineRect { setNeedsDisplay(oldLineRect) }
         if let newLineRect = currentLineRect(), newLineRect != oldLineRect { setNeedsDisplay(newLineRect) }
+        scheduleUnfoldCheck()
     }
     
     override func doCommand(by selector: Selector) {
@@ -2020,6 +2241,11 @@ final class MangleTextView: NSTextView {
             return
         }
         let sel = selectedRange()
+        // Deleting into folded text would remove a character the user can't see; open it instead.
+        if sel.length == 0, let f = fold(endingAt: sel.location) {
+            unfold(f)
+            return
+        }
         if sel.length == 0, sel.location > 0, sel.location < (string as NSString).length {
             let text = string as NSString
             let before = text.character(at: sel.location - 1)
@@ -2036,11 +2262,31 @@ final class MangleTextView: NSTextView {
         super.deleteBackward(sender)
     }
 
+    override func deleteForward(_ sender: Any?) {
+        let sel = selectedRange()
+        if !hasMultipleSelections, sel.length == 0, let f = fold(startingAt: sel.location) {
+            unfold(f)
+            return
+        }
+        super.deleteForward(sender)
+    }
+    
+    override func mouseDown(with event: NSEvent) {
+        // Clicking a fold's ⋯ opens it.
+        if let f = fold(withPlaceholderAt: convert(event.locationInWindow, from: nil)) {
+            unfold(f)
+            setSelectedRange(NSRange(location: f.location, length: 0))
+            return
+        }
+        super.mouseDown(with: event)
+    }
+
     // MARK: Indent Guides
 
     override func draw(_ dirtyRect: NSRect) {
         super.draw(dirtyRect)
         drawIndentGuides(in: dirtyRect)
+        drawFoldPlaceholders(in: dirtyRect)
         if !extraCarets.isEmpty {
             insertionPointColor.setFill()
             for location in extraCarets {
@@ -2086,6 +2332,12 @@ final class MangleTextView: NSTextView {
 
         var charIdx = lineStart
         while charIdx < len {
+            // Lines merged into a folded line above draw nothing; skip past the fold.
+            if let f = fold(hidingLineStart: charIdx) {
+                charIdx = NSMaxRange(text.lineRange(for: NSRange(location: NSMaxRange(f), length: 0)))
+                if charIdx > visibleEnd { break }
+                continue
+            }
             var ls = 0, le = 0, ce = 0
             text.getLineStart(&ls, end: &le, contentsEnd: &ce, for: NSRange(location: charIdx, length: 0))
             let lineText = text.substring(with: NSRange(location: ls, length: ce - ls))
@@ -2230,9 +2482,13 @@ struct CustomTextEditor: NSViewRepresentable {
     var isDark: Bool
     var themeName: String
     var status: EditorStatus
+    /// Presentation mode: no line numbers (fold chevrons stay) and roomier margins.
+    var isPresenting = false
     var onTextViewReady: ((NSTextView) -> Void)?
     /// Called (debounced) after the text changes.
     var onTextChange: (() -> Void)?
+    /// Called after a paste that filled an empty document or replaced all of it.
+    var onPasteReplacedDocument: (() -> Void)?
     
     func makeNSView(context: Context) -> NSView {
         guard let highlightr = Highlightr() else {
@@ -2270,10 +2526,12 @@ struct CustomTextEditor: NSViewRepresentable {
         layoutManager.addTextContainer(textContainer)
         
         let textView = MangleTextView(frame: .zero, textContainer: textContainer)
+        layoutManager.delegate = textView   // hides folded text
+        textView.onPasteReplacedDocument = { [weak coordinator] in coordinator?.parent.onPasteReplacedDocument?() }
         textView.isEditable = true
         textView.isSelectable = true
         textView.allowsUndo = true
-        textView.textContainerInset = NSSize(width: 14, height: 14)
+        textView.textContainerInset = Coordinator.textInset(presenting: isPresenting)
         textView.isVerticallyResizable = true
         textView.isHorizontallyResizable = false
         textView.autoresizingMask = [.width]
@@ -2298,6 +2556,7 @@ struct CustomTextEditor: NSViewRepresentable {
         let rulerView = LineNumberRulerView(scrollView: scrollView, orientation: .verticalRuler)
         rulerView.clientView = textView
         rulerView.fontSize = fontSize
+        rulerView.showsLineNumbers = !isPresenting
         scrollView.verticalRulerView = rulerView
         scrollView.hasVerticalRuler = true
         scrollView.rulersVisible = true
@@ -2339,6 +2598,13 @@ struct CustomTextEditor: NSViewRepresentable {
             // Manual language change from the picker
             storage.language = language
             textView.autoCloseQuotes = Coordinator.pairsQuotes(language)
+            textView.foldSkipsStrings = Coordinator.pairsQuotes(language)
+        }
+        
+        if coordinator.rulerView?.showsLineNumbers == isPresenting {
+            coordinator.rulerView?.showsLineNumbers = !isPresenting
+            textView.textContainerInset = Coordinator.textInset(presenting: isPresenting)
+            coordinator.rulerView?.needsDisplay = true
         }
         
         let newFont = editorFont.nsFont(size: fontSize)
@@ -2453,6 +2719,10 @@ struct CustomTextEditor: NSViewRepresentable {
             NotificationCenter.default.removeObserver(self)
         }
         
+        static func textInset(presenting: Bool) -> NSSize {
+            presenting ? NSSize(width: 28, height: 24) : NSSize(width: 14, height: 14)
+        }
+        
         static func pairsQuotes(_ language: String) -> Bool {
             language != "plaintext" && language != "markdown"
         }
@@ -2472,6 +2742,7 @@ struct CustomTextEditor: NSViewRepresentable {
                 return
             }
             isApplyingProgrammaticChange = true
+            (textView as? MangleTextView)?.removeAllFoldsForReload()
             // Disable highlighting while replacing so we don't run a pass with the previous
             // document's language, then highlight once with the right one.
             storage.language = nil
@@ -2493,6 +2764,7 @@ struct CustomTextEditor: NSViewRepresentable {
                 mtv.currentFindRange = nil
                 mtv.bracketRanges = []
                 mtv.autoCloseQuotes = Self.pairsQuotes(language)
+                mtv.foldSkipsStrings = Self.pairsQuotes(language)
                 let indentation = Indentation.detect(in: text) ?? .defaultForSettings
                 mtv.indentation = indentation
                 publishStatus { if $0.indentation != indentation { $0.indentation = indentation } }
@@ -2651,7 +2923,7 @@ struct CustomTextEditor: NSViewRepresentable {
         @objc func codeStorageDidProcessEditing(_ notification: Notification) {
             guard let storage = notification.object as? NSTextStorage else { return }
             if storage.editedMask.contains(.editedCharacters) {
-                textView?.noteCharactersEdited(at: storage.editedRange.location)
+                textView?.noteCharactersEdited(in: storage.editedRange, changeInLength: storage.changeInLength)
             }
             rulerView?.needsDisplay = true
         }
@@ -3127,6 +3399,7 @@ private struct ShortcutsPopover: View {
             ("⌘ K",        "Command palette"),
             ("⌘ S",        "Save to clipboard"),
             ("⌘ ↩",        "Save and paste into previous app"),
+            ("⌘ N",        "New scratch pad"),
             ("Esc",        "Close editor"),
         ]),
         ("Editing", [
@@ -3161,6 +3434,14 @@ private struct ShortcutsPopover: View {
             ("⌘ −",        "Decrease font size"),
             ("⌘ 0",        "Reset font size"),
             ("⌥ Z",        "Toggle word wrap"),
+            ("⌥ ⌘ P",      "Presentation mode"),
+        ]),
+        ("Folding & JSON", [
+            ("⌥ ⌘ ←",      "Fold block"),
+            ("⌥ ⌘ →",      "Unfold block"),
+            ("⌥ ⇧ ⌘ ←",    "Fold all"),
+            ("⌥ ⇧ ⌘ →",    "Unfold all"),
+            ("⌥ ⇧ ⌘ C",    "Copy JSON path"),
         ]),
         ("Transform", [
             ("⌘ T",        "Open Transform menu"),
