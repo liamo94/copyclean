@@ -2247,6 +2247,8 @@ struct CustomTextEditor: NSViewRepresentable {
             return sv
         }
         let coordinator = context.coordinator
+        coordinator.isInViewUpdate = true
+        defer { coordinator.isInViewUpdate = false }
         let theme = themeName
         highlightr.setTheme(to: theme)
         highlightr.theme.setCodeFont(editorFont.nsFont(size: fontSize))
@@ -2325,6 +2327,8 @@ struct CustomTextEditor: NSViewRepresentable {
     func updateNSView(_ nsView: NSView, context: Context) {
         let coordinator = context.coordinator
         coordinator.parent = self
+        coordinator.isInViewUpdate = true
+        defer { coordinator.isInViewUpdate = false }
         
         guard let scrollView = nsView as? NSScrollView,
               let textView = scrollView.documentView as? MangleTextView else { return }
@@ -2426,6 +2430,19 @@ struct CustomTextEditor: NSViewRepresentable {
         var appliedGeneration = -1
         // Suppresses selection callbacks during programmatic text replacement
         var isApplyingProgrammaticChange = false
+        /// True while SwiftUI is running makeNSView/updateNSView. Publishing ObservableObject
+        /// changes then is "undefined behavior" per SwiftUI, so status writes are deferred.
+        var isInViewUpdate = false
+        
+        /// Applies status (published) changes now, or right after the current view update.
+        private func publishStatus(_ change: @escaping (EditorStatus) -> Void) {
+            let status = parent.status
+            if isInViewUpdate {
+                DispatchQueue.main.async { change(status) }
+            } else {
+                change(status)
+            }
+        }
         
         private var textChangeWork: DispatchWorkItem?
         private var statsGeneration = 0
@@ -2478,7 +2495,7 @@ struct CustomTextEditor: NSViewRepresentable {
                 mtv.autoCloseQuotes = Self.pairsQuotes(language)
                 let indentation = Indentation.detect(in: text) ?? .defaultForSettings
                 mtv.indentation = indentation
-                if parent.status.indentation != indentation { parent.status.indentation = indentation }
+                publishStatus { if $0.indentation != indentation { $0.indentation = indentation } }
             }
             textView.setSelectedRange(NSRange(location: 0, length: 0))
             textView.scrollRangeToVisible(NSRange(location: 0, length: 0))
@@ -2849,9 +2866,10 @@ struct CustomTextEditor: NSViewRepresentable {
                 rulerView?.activeLine = lineNum
                 rulerView?.needsDisplay = true
             }
-            let status = parent.status
-            if status.cursorLine != lineNum { status.cursorLine = lineNum }
-            if status.cursorColumn != col { status.cursorColumn = col }
+            publishStatus { status in
+                if status.cursorLine != lineNum { status.cursorLine = lineNum }
+                if status.cursorColumn != col { status.cursorColumn = col }
+            }
             
             highlightMatchingBracket(in: textView)
         }
