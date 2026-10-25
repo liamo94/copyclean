@@ -2,6 +2,7 @@ import SwiftUI
 import Carbon
 import Combine
 import ServiceManagement
+import Highlightr
 
 // Shortcut configuration
 struct KeyboardShortcut: Codable, Equatable {
@@ -90,6 +91,32 @@ class SettingsManager: ObservableObject {
             UserDefaults.standard.set(wordWrap, forKey: wordWrapKey)
         }
     }
+    @Published var editorFont: EditorFont {
+        didSet {
+            UserDefaults.standard.set(editorFont.rawValue, forKey: editorFontKey)
+        }
+    }
+    /// Default indentation for documents whose own indentation can't be detected.
+    @Published var useTabs: Bool {
+        didSet {
+            UserDefaults.standard.set(useTabs, forKey: useTabsKey)
+        }
+    }
+    @Published var darkTheme: String {
+        didSet {
+            UserDefaults.standard.set(darkTheme, forKey: darkThemeKey)
+        }
+    }
+    @Published var lightTheme: String {
+        didSet {
+            UserDefaults.standard.set(lightTheme, forKey: lightThemeKey)
+        }
+    }
+    
+    static let defaultDarkTheme = "atom-one-dark"
+    static let defaultLightTheme = "xcode"
+    
+    func themeName(isDark: Bool) -> String { isDark ? darkTheme : lightTheme }
 
     var onShortcutsChanged: (() -> Void)?
 
@@ -100,6 +127,10 @@ class SettingsManager: ObservableObject {
     private let maxHistoryKey = "MaxHistory"
     private let tabSizeKey = "TabSize"
     private let wordWrapKey = "WordWrap"
+    private let editorFontKey = "EditorFontName"
+    private let useTabsKey = "UseTabs"
+    private let darkThemeKey = "DarkTheme"
+    private let lightThemeKey = "LightTheme"
 
     init() {
         // Default: Ctrl+Cmd+E for editor
@@ -133,6 +164,13 @@ class SettingsManager: ObservableObject {
         tabSize = storedTabSize > 0 ? storedTabSize : 4
 
         wordWrap = UserDefaults.standard.object(forKey: "WordWrap") as? Bool ?? true
+
+        let storedFontName = UserDefaults.standard.string(forKey: "EditorFontName")
+        editorFont = storedFontName.flatMap(EditorFont.init(rawValue:)) ?? .system
+        
+        useTabs = UserDefaults.standard.bool(forKey: "UseTabs")
+        darkTheme = UserDefaults.standard.string(forKey: "DarkTheme") ?? Self.defaultDarkTheme
+        lightTheme = UserDefaults.standard.string(forKey: "LightTheme") ?? Self.defaultLightTheme
     }
     
     func save() {
@@ -223,6 +261,18 @@ class ShortcutCaptureNSView: NSView {
     }
 }
 
+/// Highlightr's bundled syntax themes, read once.
+enum ThemeCatalog {
+    static let names: [String] = {
+        guard let h = Highlightr() else { return [SettingsManager.defaultDarkTheme, SettingsManager.defaultLightTheme] }
+        return h.availableThemes().sorted()
+    }()
+    
+    static func displayName(_ name: String) -> String {
+        name.split(separator: "-").map { $0.prefix(1).uppercased() + $0.dropFirst() }.joined(separator: " ")
+    }
+}
+
 struct SettingsView: View {
     @ObservedObject var settings = SettingsManager.shared
     
@@ -230,11 +280,25 @@ struct SettingsView: View {
     @State private var historyShortcut: KeyboardShortcut
     @State private var showClearConfirm = false
     @State private var maxHistory: Int
+    // Edited locally and applied on Save, so Cancel discards them like it does the shortcuts.
+    @State private var pauseHistory: Bool
+    @State private var tabSize: Int
+    @State private var editorFont: EditorFont
+    @State private var useTabs: Bool
+    @State private var darkTheme: String
+    @State private var lightTheme: String
     
     init() {
-        _editorShortcut = State(initialValue: SettingsManager.shared.editorShortcut)
-        _historyShortcut = State(initialValue: SettingsManager.shared.historyShortcut)
-        _maxHistory = State(initialValue: SettingsManager.shared.maxHistory)
+        let settings = SettingsManager.shared
+        _editorShortcut = State(initialValue: settings.editorShortcut)
+        _historyShortcut = State(initialValue: settings.historyShortcut)
+        _maxHistory = State(initialValue: settings.maxHistory)
+        _pauseHistory = State(initialValue: settings.pauseHistory)
+        _tabSize = State(initialValue: settings.tabSize)
+        _editorFont = State(initialValue: settings.editorFont)
+        _useTabs = State(initialValue: settings.useTabs)
+        _darkTheme = State(initialValue: settings.darkTheme)
+        _lightTheme = State(initialValue: settings.lightTheme)
     }
     
     var body: some View {
@@ -281,7 +345,7 @@ struct SettingsView: View {
                 HStack {
                     Text("Pause History")
                     Spacer()
-                    Toggle("", isOn: $settings.pauseHistory)
+                    Toggle("", isOn: $pauseHistory)
                         .labelsHidden()
                 }
                 
@@ -298,7 +362,7 @@ struct SettingsView: View {
                 HStack {
                     Text("Tab Size")
                     Spacer()
-                    Picker("", selection: $settings.tabSize) {
+                    Picker("", selection: $tabSize) {
                         Text("2 spaces").tag(2)
                         Text("4 spaces").tag(4)
                     }
@@ -309,6 +373,46 @@ struct SettingsView: View {
                 
                 Divider()
                 
+                HStack {
+                    Text("Indent With Tabs")
+                    Spacer()
+                    Toggle("", isOn: $useTabs)
+                        .labelsHidden()
+                }
+                .help("Used when a document's own indentation can't be detected")
+
+                Divider()
+
+                HStack {
+                    Text("Editor Font")
+                    Spacer()
+                    Picker("", selection: $editorFont) {
+                        ForEach(EditorFont.allCases) { font in
+                            Text(font.rawValue).tag(font)
+                        }
+                    }
+                    .labelsHidden()
+                    .frame(width: 160)
+                }
+                
+                Divider()
+                
+                HStack {
+                    Text("Dark Theme")
+                    Spacer()
+                    themePicker($darkTheme)
+                }
+                
+                Divider()
+                
+                HStack {
+                    Text("Light Theme")
+                    Spacer()
+                    themePicker($lightTheme)
+                }
+
+                Divider()
+
                 HStack {
                     Text("Clear History")
                     Spacer()
@@ -344,7 +448,15 @@ struct SettingsView: View {
                     settings.editorShortcut = editorShortcut
                     settings.historyShortcut = historyShortcut
                     settings.maxHistory = maxHistory
+                    settings.pauseHistory = pauseHistory
+                    settings.tabSize = tabSize
+                    settings.editorFont = editorFont
+                    settings.useTabs = useTabs
+                    settings.darkTheme = darkTheme
+                    settings.lightTheme = lightTheme
                     settings.save()
+                    // Apply a lowered limit now rather than on the next copy.
+                    AppDelegate.shared?.historyManager.enforceLimit(save: true)
                     NSApp.keyWindow?.close()
                 }
                 .keyboardShortcut(.defaultAction)
@@ -353,7 +465,17 @@ struct SettingsView: View {
             .padding(.bottom, 20)
         }
         .padding()
-        .frame(width: 350, height: 540)
+        .frame(width: 350, height: 700)
         .tint(AppTheme.tealSUI)
+    }
+    
+    private func themePicker(_ selection: Binding<String>) -> some View {
+        Picker("", selection: selection) {
+            ForEach(ThemeCatalog.names, id: \.self) { name in
+                Text(ThemeCatalog.displayName(name)).tag(name)
+            }
+        }
+        .labelsHidden()
+        .frame(width: 180)
     }
 }
