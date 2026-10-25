@@ -4,7 +4,7 @@ import Combine
 
 struct HistoryEntry: Identifiable, Codable, Hashable {
     let id: UUID
-    let text: String
+    var text: String
     var timestamp: Date
     var isPinned: Bool
     var language: String? // nil = auto-detect; set when user manually picks a language
@@ -41,7 +41,7 @@ struct HistoryEntry: Identifiable, Codable, Hashable {
     }
 }
 
-/// Derived, display-only data for a history entry. `text` is immutable, so this is
+/// Derived, display-only data for a history entry. `text` only changes via `addEntry`, which drops the cache, so this is
 /// computed once per entry instead of re-splitting/re-hashing the full text on every render.
 struct HistoryEntryMeta {
     let preview: String
@@ -58,6 +58,8 @@ class HistoryManager: ObservableObject {
     private var metaCache: [UUID: HistoryEntryMeta] = [:]
     private let saveQueue = DispatchQueue(label: "co.liamo.mangle.history-save", qos: .utility)
     private var pendingSave: DispatchWorkItem?
+    /// The last deleted entry and where it was, for ⌘Z in Recent Snippets.
+    private var lastDeleted: (entry: HistoryEntry, index: Int)?
 
     nonisolated private static var historyFileURL: URL {
         let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
@@ -87,8 +89,23 @@ class HistoryManager: ObservableObject {
         return meta
     }
 
-    func addEntry(_ text: String, isScratch: Bool = false) {
+    /// Adds `text` at the top. With `replacing`, saving an edit of that entry updates it in
+    /// place instead of leaving a near-duplicate beside it — unless it's pinned, which keeps
+    /// the original as it was.
+    func addEntry(_ text: String, isScratch: Bool = false, replacing sourceID: UUID? = nil) {
         guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
+
+        if let sourceID, let idx = entries.firstIndex(where: { $0.id == sourceID }),
+           !entries[idx].isPinned, entries[idx].text != text,
+           !entries.contains(where: { $0.text == text }) {
+            var entry = entries.remove(at: idx)
+            entry.text = text
+            entry.timestamp = Date()
+            metaCache[entry.id] = nil
+            entries.insert(entry, at: 0)
+            saveHistory()
+            return
+        }
 
         // Deduplicate against the whole list, not just the most recent entry — copying
         // A, then B, then A again used to leave two separate "A" entries in history.
@@ -126,12 +143,29 @@ class HistoryManager: ObservableObject {
     }
 
     func deleteEntry(_ entry: HistoryEntry) {
-        entries.removeAll { $0.id == entry.id }
+        guard let idx = entries.firstIndex(where: { $0.id == entry.id }) else { return }
+        lastDeleted = (entries.remove(at: idx), idx)
         metaCache[entry.id] = nil
         saveHistory()
     }
 
+    /// Called when Recent Snippets closes, so ⌘Z next time can't bring back an old deletion.
+    func forgetDeleted() {
+        lastDeleted = nil
+    }
+
+    /// Puts the most recently deleted entry back where it was.
+    @discardableResult
+    func undoDelete() -> HistoryEntry? {
+        guard let (entry, idx) = lastDeleted else { return nil }
+        lastDeleted = nil
+        entries.insert(entry, at: min(idx, entries.count))
+        saveHistory()
+        return entry
+    }
+
     func clearHistory() {
+        lastDeleted = nil
         entries.removeAll()
         metaCache.removeAll()
         saveHistory()
@@ -237,108 +271,208 @@ final class EditorStatus: ObservableObject {
     @Published var lineEnding: LineEnding = .lf
 }
 
+/// One of the editor's two documents: the edit of copied text, or the scratch pad.
+struct EditorBuffer {
+    var text = ""
+    var baseText = ""
+    var language = "plaintext"
+    var languageIsManual = false
+    var sourceEntryID: UUID?
+    var selection = NSRange(location: 0, length: 0)
+
+    var isDirty: Bool { text != baseText }
+}
+
+/// Where the edit document's text came from, shown in the window title so it's clear
+/// whether the hotkey picked up a selection, the clipboard or an earlier unsaved edit.
+enum EditorOrigin: Equatable {
+    case selection(app: String?)
+    case clipboard
+    case restored
+    case history
+
+    var title: String {
+        switch self {
+        case .selection(let app): return app.map { "Selection from \($0)" } ?? "Selection"
+        case .clipboard:          return "Clipboard"
+        case .restored:           return "Unsaved Edit"
+        case .history:            return "Recent Snippet"
+        }
+    }
+}
+
 // ViewModel for editor state
 class EditorViewModel: ObservableObject {
     /// The text view is the source of truth while editing — typing doesn't round-trip
     /// through SwiftUI. `loadedText` is only what was last pushed *into* the editor.
     private(set) var loadedText: String = ""
+    private(set) var loadedSelection = NSRange(location: 0, length: 0)
     /// Bumped whenever new text is pushed into the editor; `CustomTextEditor` applies it then.
     @Published private(set) var loadGeneration = 0
+    /// The generation the text view has applied. Until it catches up, the text view still
+    /// holds the previous document, so `text` answers from `loadedText` instead.
+    var appliedGeneration = -1
     @Published var currentLanguage: String = "plaintext"
     var baseText: String = ""
     var languageIsManual: Bool = false  // true when user explicitly picked a language
     var sourceEntryID: UUID? = nil      // set when editing an existing history entry
-    /// A blank scratch pad rather than an edit of copied text: closing it doesn't ask to
-    /// discard, and its text is kept in history when something replaces it.
+    /// Showing the scratch pad rather than the edit of copied text. They're separate
+    /// documents: switching parks the one on screen and brings back the other, so opening
+    /// the editor on copied text never pushes the scratch pad out.
     @Published private(set) var isScratch = false
+    /// The document that isn't on screen.
+    private var parked = EditorBuffer()
+    /// Where the edit document came from (the scratch pad is always just "Scratch Pad").
+    @Published var origin: EditorOrigin = .clipboard
     /// Large text, minimal chrome, and the window stays up when the app loses focus.
     @Published var isPresenting = false
     let status = EditorStatus()
     weak var textView: NSTextView?
+    /// Set by the editor view: closes the editor the way Esc does (Find bar included).
+    var requestClose: (() -> Void)?
+
+    private var textViewIsCurrent: Bool { textView != nil && appliedGeneration == loadGeneration }
 
     /// The current editor contents.
-    var text: String { textView?.string ?? loadedText }
+    var text: String { textViewIsCurrent ? textView!.string : loadedText }
 
     var isDirty: Bool { text != baseText }
 
-    /// Load new text and mark it as the saved baseline. Passing a language marks it as a
-    /// manual choice; otherwise it's detected here, up front, so the editor highlights once
-    /// with the right grammar instead of flashing the previous document's language first.
-    func load(_ newText: String, language: String? = nil) {
-        loadedText = newText
-        baseText = newText
-        if let language {
-            languageIsManual = true
-            currentLanguage = language
-        } else {
-            languageIsManual = false
-            // Highlighting multi-MB documents costs seconds of CPU and a main-thread hitch
-            // applying the attributes; default those to plain text (users can still pick one).
-            currentLanguage = newText.utf16.count > 1_000_000
-                ? "plaintext"
-                : CustomTextEditor.Coordinator.guessLanguage(newText)
-        }
-        isScratch = false
-        loadGeneration += 1
+    /// The on-screen document as it stands now.
+    var current: EditorBuffer {
+        EditorBuffer(
+            text: text, baseText: baseText, language: currentLanguage, languageIsManual: languageIsManual,
+            sourceEntryID: sourceEntryID, selection: textViewIsCurrent ? textView!.selectedRange() : loadedSelection
+        )
     }
-    
-    /// Starts an empty scratch pad.
+
+    /// The edit or scratch document, whether or not it's on screen.
+    func buffer(scratch: Bool) -> EditorBuffer {
+        scratch == isScratch ? current : parked
+    }
+
+    /// Puts the scratch pad (or the edit) on screen, parking the other where it was.
+    func show(scratch: Bool) {
+        guard scratch != isScratch else { return }
+        let other = parked
+        parked = current
+        apply(other, scratch: scratch)
+    }
+
+    /// Highlighting multi-MB documents costs seconds of CPU and a main-thread hitch applying
+    /// the attributes; those default to plain text (users can still pick a language).
+    static func detectLanguage(_ text: String) -> String {
+        text.utf16.count > 1_000_000 ? "plaintext" : CustomTextEditor.Coordinator.guessLanguage(text)
+    }
+
+    /// Load new text into the edit document and mark it as the saved baseline. Passing a
+    /// language marks it as a manual choice; otherwise it's detected here, up front, so the
+    /// editor highlights once with the right grammar instead of flashing the previous
+    /// document's language first.
+    func load(_ newText: String, language: String? = nil) {
+        show(scratch: false)
+        let detected = language ?? Self.detectLanguage(newText)
+        apply(EditorBuffer(text: newText, baseText: newText, language: detected, languageIsManual: language != nil), scratch: false)
+    }
+
+    /// Empties the scratch pad and shows it.
     func loadScratch() {
-        load("")
-        sourceEntryID = nil
-        isScratch = true
+        show(scratch: true)
+        apply(EditorBuffer(), scratch: true)
+    }
+
+    /// Replaces a document, on screen or parked — e.g. with a draft from the previous run.
+    func set(_ buffer: EditorBuffer, scratch: Bool) {
+        if scratch == isScratch {
+            apply(buffer, scratch: scratch)
+        } else {
+            parked = buffer
+        }
     }
 
     /// Mark the current text as saved.
     func markSaved() {
         baseText = text
     }
-    
-    /// Throws away the current text so a hidden editor (or saved draft) can't bring it back.
+
+    /// Throws away the on-screen document so nothing can bring it back.
     func discard() {
-        load("")
-        sourceEntryID = nil
-        EditorDraft.clear()
+        apply(EditorBuffer(), scratch: isScratch)
     }
-    
-    /// Reloads a draft from a previous run, keeping it marked as unsaved.
-    func restore(_ draft: EditorDraft) {
-        load(draft.text, language: draft.languageIsManual ? draft.language : nil)
-        baseText = draft.baseText
-        sourceEntryID = draft.sourceEntryID
-        isScratch = draft.isScratch ?? false
+
+    private func apply(_ buffer: EditorBuffer, scratch: Bool) {
+        loadedText = buffer.text
+        loadedSelection = buffer.selection
+        baseText = buffer.baseText
+        currentLanguage = buffer.language
+        languageIsManual = buffer.languageIsManual
+        sourceEntryID = buffer.sourceEntryID
+        isScratch = scratch
+        loadGeneration += 1
     }
 }
 
-/// Unsaved editor contents persisted across app launches.
-struct EditorDraft: Codable {
+/// An editor document persisted across app launches: the unsaved edit in draft.json, the
+/// scratch pad in scratch.json.
+struct EditorDraft: Codable, Equatable {
     let text: String
     let baseText: String
     let language: String
     let languageIsManual: Bool
     let sourceEntryID: UUID?
     let clipboardChangeCount: Int
+    /// Older versions kept a single draft, which could be the scratch pad.
     let isScratch: Bool?
-    
-    private static var url: URL {
+
+    init(_ buffer: EditorBuffer, clipboardChangeCount: Int, isScratch: Bool) {
+        text = buffer.text
+        baseText = buffer.baseText
+        language = buffer.language
+        languageIsManual = buffer.languageIsManual
+        sourceEntryID = buffer.sourceEntryID
+        self.clipboardChangeCount = clipboardChangeCount
+        self.isScratch = isScratch
+    }
+
+    var buffer: EditorBuffer {
+        EditorBuffer(
+            text: text, baseText: baseText,
+            language: languageIsManual ? language : EditorViewModel.detectLanguage(text),
+            languageIsManual: languageIsManual, sourceEntryID: sourceEntryID
+        )
+    }
+
+    private static func url(scratch: Bool) -> URL {
         FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
             .appendingPathComponent("Mangle", isDirectory: true)
-            .appendingPathComponent("draft.json")
+            .appendingPathComponent(scratch ? "scratch.json" : "draft.json")
     }
-    
-    static func load() -> EditorDraft? {
-        guard let data = try? Data(contentsOf: url) else { return nil }
+
+    private static func read(scratch: Bool) -> EditorDraft? {
+        guard let data = try? Data(contentsOf: url(scratch: scratch)) else { return nil }
         return try? JSONDecoder().decode(EditorDraft.self, from: data)
     }
-    
-    func save() {
-        guard let data = try? JSONEncoder().encode(self) else { return }
-        try? FileManager.default.createDirectory(at: Self.url.deletingLastPathComponent(), withIntermediateDirectories: true)
-        try? data.write(to: Self.url, options: .atomic)
+
+    /// The edit and scratch drafts from the previous run.
+    static func load() -> (edit: EditorDraft?, scratch: EditorDraft?) {
+        var edit = read(scratch: false)
+        var scratch = read(scratch: true)
+        if edit?.isScratch == true {
+            if scratch == nil { scratch = edit }
+            edit = nil
+        }
+        return (edit, scratch)
     }
-    
-    static func clear() {
-        try? FileManager.default.removeItem(at: url)
+
+    func save() {
+        let url = Self.url(scratch: isScratch == true)
+        guard let data = try? JSONEncoder().encode(self) else { return }
+        try? FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try? data.write(to: url, options: .atomic)
+    }
+
+    static func clear(scratch: Bool) {
+        try? FileManager.default.removeItem(at: url(scratch: scratch))
     }
 }
 

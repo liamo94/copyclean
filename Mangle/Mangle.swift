@@ -1,6 +1,8 @@
 import SwiftUI
 import AppKit
 import Carbon
+import Combine
+import UniformTypeIdentifiers
 
 @main
 struct MangleApp: App {
@@ -13,7 +15,7 @@ struct MangleApp: App {
     }
 }
 
-class AppDelegate: NSObject, NSApplicationDelegate {
+class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMenuDelegate {
     static weak var shared: AppDelegate?
     var editorWindow: NSWindow?
     var historyWindow: NSWindow?
@@ -25,17 +27,21 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     var historyManager = HistoryManager()
     var statusItem: NSStatusItem?
     var eventHandlerInstalled = false
-    var historyReturnAction: (() -> Void)?
-    var historyCopyAction: (() -> Void)?
-    var historyDeleteAction: (() -> Void)?
-    var historyFocusSearchAction: (() -> Void)?
+    /// Handles keys pressed in Recent Snippets; set by `HistoryView`. Returns nil when handled.
+    var historyKeyHandler: ((NSEvent) -> NSEvent?)?
     var keyEventMonitor: Any?
     var clipboardChangeCountOnHide: Int = 0
-    /// The app that was frontmost when the editor/history opened — Save & Paste returns to it.
+    /// The app that was frontmost when the editor/history opened — Save & Paste returns to it,
+    /// and so does focus when the last Mangle window hides.
     private var previousApp: NSRunningApplication?
-    /// Unsaved editor text from the previous run, restored by the next hotkey press when
-    /// there's no new selection or clipboard content (same rules as a hidden editor).
-    private var pendingDraft: EditorDraft?
+    /// Keeps the editor's title in step with what it's showing.
+    private var titleObserver: AnyCancellable?
+    /// What's on disk for each document (nil = no file), so unchanged drafts aren't rewritten
+    /// every time the app loses focus.
+    private var writtenEditDraft: EditorDraft?
+    private var writtenScratchDraft: EditorDraft?
+    private static let editorSizeKey = "EditorWindowSize"
+    private static let historySizeKey = "HistoryWindowSize"
     /// Global monitor for the ⌘C ⌘C trigger (see `updateDoubleCopyMonitor`).
     private var doubleCopyMonitor: Any?
     private var lastCopyPress: Date = .distantPast
@@ -71,9 +77,18 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func finishLaunching() {
-        if let draft = EditorDraft.load() {
-            pendingDraft = draft
-            clipboardChangeCountOnHide = draft.clipboardChangeCount
+        // Unsaved text from the previous run goes straight back into the two documents; the
+        // next hotkey press brings it back under the same rules as a hidden editor.
+        let drafts = EditorDraft.load()
+        writtenEditDraft = drafts.edit
+        writtenScratchDraft = drafts.scratch
+        if let edit = drafts.edit {
+            editorViewModel.set(edit.buffer, scratch: false)
+            editorViewModel.origin = .restored
+            clipboardChangeCountOnHide = edit.clipboardChangeCount
+        }
+        if let scratch = drafts.scratch {
+            editorViewModel.set(scratch.buffer, scratch: true)
         }
         
         // Setup settings callback
@@ -96,51 +111,11 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         // Create menu bar icon
         setupMenuBar()
         
-        // Suppress beep sounds for unhandled keys in history window
+        // Recent Snippets' keys (see `HistoryView.handleKey`).
         keyEventMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
-            guard let self = self,
-                  self.historyWindow?.isKeyWindow == true else {
-                return event
-            }
-            // Escape or Cmd+W -> close history
-            if event.keyCode == 53 ||
-                (event.keyCode == 13 && event.modifierFlags.contains(.command)) {
-                self.historyWindow?.close()
-                self.historyWindow = nil
-                return nil
-            }
-            // Return key -> edit selected entry
-            if event.keyCode == 36 {
-                self.historyReturnAction?()
-                return nil
-            }
-            // Cmd+C -> copy selected entry and close
-            if event.keyCode == 8 && event.modifierFlags.contains(.command) {
-                self.historyCopyAction?()
-                return nil
-            }
-            // Cmd+F -> focus search field
-            if event.keyCode == 3 && event.modifierFlags.contains(.command) {
-                self.historyFocusSearchAction?()
-                return nil
-            }
-            // Allow typing in search field
-            if let responder = self.historyWindow?.firstResponder,
-               responder is NSTextView {
-                return event
-            }
-            // Delete/Backspace -> delete selected entry (only when not in search field)
-            if event.keyCode == 51 {
-                self.historyDeleteAction?()
-                return nil
-            }
-            // Allow arrow keys, tab
-            let passThroughKeys: Set<UInt16> = [123, 124, 125, 126, 48]
-            if passThroughKeys.contains(event.keyCode) {
-                return event
-            }
-            // Swallow everything else silently
-            return nil
+            guard let self, let window = self.historyWindow, event.window === window,
+                  let handler = self.historyKeyHandler else { return event }
+            return handler(event)
         }
         
         // Hide editor/history when user switches to another app
@@ -201,13 +176,21 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         editorItem.keyEquivalentModifierMask = settings.editorShortcut.cocoaModifiers
         menu.addItem(editorItem)
         
-        let scratchItem = NSMenuItem(title: "New Scratch", action: #selector(showScratch), keyEquivalent: settings.scratchShortcut.keyEquivalent)
+        let scratchItem = NSMenuItem(title: "Scratch Pad", action: #selector(showScratch), keyEquivalent: settings.scratchShortcut.keyEquivalent)
         scratchItem.keyEquivalentModifierMask = settings.scratchShortcut.cocoaModifiers
         menu.addItem(scratchItem)
         
         let historyItem = NSMenuItem(title: "Recent Snippets", action: #selector(showHistory), keyEquivalent: settings.historyShortcut.keyEquivalent)
         historyItem.keyEquivalentModifierMask = settings.historyShortcut.cocoaModifiers
         menu.addItem(historyItem)
+        
+        // Filled in each time it opens (see `menuNeedsUpdate`).
+        let recentMenu = NSMenu(title: "Copy Recent")
+        recentMenu.delegate = self
+        let recentItem = NSMenuItem(title: "Copy Recent", action: nil, keyEquivalent: "")
+        recentItem.submenu = recentMenu
+        menu.addItem(recentItem)
+        
         menu.addItem(NSMenuItem.separator())
         menu.addItem(NSMenuItem(title: "Settings...", action: #selector(showSettings), keyEquivalent: ","))
         menu.addItem(NSMenuItem.separator())
@@ -216,72 +199,99 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         statusItem?.menu = menu
     }
     
-    @objc func showEditorFromMenu() {
-        rememberFrontmostApp()
-        let anchor = visibleWindowFrame()
-        closeHistory()
-        let text = (AXIsProcessTrusted() ? selectedTextFromFrontmostApp() : nil) ?? NSPasteboard.general.string(forType: .string) ?? ""
-        loadEditor(text)
-        editorViewModel.sourceEntryID = nil
-        presentEditorWindow(replacing: anchor)
+    /// The Copy Recent submenu: the first few snippets, in Recent Snippets' order.
+    func menuNeedsUpdate(_ menu: NSMenu) {
+        menu.removeAllItems()
+        let entries = historyManager.entries
+        let ordered = entries.filter(\.isPinned) + entries.filter { !$0.isPinned }
+        guard !ordered.isEmpty else {
+            let empty = NSMenuItem(title: "No Snippets Yet", action: nil, keyEquivalent: "")
+            empty.isEnabled = false
+            menu.addItem(empty)
+            return
+        }
+        for entry in ordered.prefix(8) {
+            var title = historyManager.meta(for: entry).preview
+            if title.count > 48 { title = String(title.prefix(47)) + "…" }
+            let item = NSMenuItem(title: title.isEmpty ? "(whitespace)" : title, action: #selector(copyRecent(_:)), keyEquivalent: "")
+            item.target = self
+            item.representedObject = entry.id
+            item.toolTip = String(entry.text.prefix(500))
+            if entry.isPinned { item.image = NSImage(systemSymbolName: "pin.fill", accessibilityDescription: "Pinned") }
+            menu.addItem(item)
+        }
+        menu.addItem(NSMenuItem.separator())
+        let all = NSMenuItem(title: "Show All…", action: #selector(showHistory), keyEquivalent: "")
+        all.target = self
+        menu.addItem(all)
     }
     
-    // MARK: - Scratch pad
+    @objc private func copyRecent(_ sender: NSMenuItem) {
+        guard let id = sender.representedObject as? UUID,
+              let entry = historyManager.entries.first(where: { $0.id == id }) else { return }
+        let pasteboard = NSPasteboard.general
+        pasteboard.clearContents()
+        pasteboard.setString(entry.text, forType: .string)
+        showToast("Copied to clipboard")
+    }
     
-    /// The scratch shortcut: brings back an unfinished scratch pad, or opens a blank one.
-    /// Pressed while the scratch pad is frontmost, it hides it again.
+    @objc func showEditorFromMenu() {
+        showEditor(fromMenu: true)
+    }
+    
+    // MARK: - Opening and hiding
+    
+    /// The scratch shortcut: shows the scratch pad as you left it (blank the first time).
+    /// Pressed while it's frontmost, it hides; pressed over the edit, it switches to it.
     @objc func showScratch() {
         let vm = editorViewModel
-        if editorWindow?.isKeyWindow == true, vm.isScratch {
-            closeEditor()
+        if editorWindow?.isKeyWindow == true {
+            if vm.isScratch {
+                dismissEditor()
+            } else {
+                vm.show(scratch: true)
+                focusEditorTextView()
+            }
             return
         }
         rememberFrontmostApp()
         let anchor = visibleWindowFrame()
         closeHistory()
-        if editorWindow == nil, let draft = pendingDraft, draft.isScratch == true {
-            vm.restore(draft)
-            presentEditorWindow(replacing: anchor)
-            return
-        }
-        if editorWindow != nil, vm.isScratch, vm.isDirty {
-            restoreHiddenEditor(vm.text, replacing: anchor)
-            return
-        }
-        newScratch(replacing: anchor)
-    }
-    
-    /// Replaces the editor's contents with a blank scratch pad (⌘N), keeping any unsaved
-    /// text in history. Opens where the window already is, if one is showing.
-    func newScratch(replacing anchor: NSRect? = nil) {
-        let anchor = anchor ?? visibleWindowFrame()
-        stashEditorText(includingEdits: true)
-        editorViewModel.loadScratch()
+        vm.show(scratch: true)
         presentEditorWindow(replacing: anchor)
     }
     
-    /// Loads text into the editor, keeping an unsaved scratch pad it replaces in history.
-    private func loadEditor(_ text: String, language: String? = nil) {
-        stashEditorText(includingEdits: false)
-        editorViewModel.load(text, language: language)
+    /// ⌘N: a blank scratch pad, keeping the current one's unsaved text in history.
+    func newScratch() {
+        let scratch = editorViewModel.buffer(scratch: true)
+        if scratch.isDirty { stash(scratch.text, isScratch: true) }
+        editorViewModel.loadScratch()
+        presentEditorWindow(replacing: visibleWindowFrame())
     }
     
-    /// Saves unsaved scratch text (and, with `includingEdits`, an unsaved edit of copied
-    /// text) to history before it's replaced, so starting something new never loses work.
-    private func stashEditorText(includingEdits: Bool) {
-        let vm = editorViewModel
-        let text: String
-        let isScratch: Bool
-        if editorWindow == nil, let draft = pendingDraft {
-            // Fresh launch: the previous run's draft hasn't been restored into the editor yet.
-            guard draft.isScratch == true || includingEdits else { return }
-            text = draft.text
-            isScratch = draft.isScratch == true
-        } else {
-            guard vm.isDirty, vm.isScratch || includingEdits else { return }
-            text = vm.text
-            isScratch = vm.isScratch
-        }
+    /// Shows `text` as the edit document, keeping an unsaved edit it replaces in history.
+    /// (The scratch pad is a separate document, so it's untouched.)
+    private func openEdit(_ text: String, origin: EditorOrigin, language: String? = nil,
+                          sourceEntryID: UUID? = nil, replacing anchor: NSRect?) {
+        let edit = editorViewModel.buffer(scratch: false)
+        if edit.isDirty { stash(edit.text, isScratch: false) }
+        editorViewModel.load(text, language: language)
+        editorViewModel.sourceEntryID = sourceEntryID
+        editorViewModel.origin = origin
+        presentEditorWindow(replacing: anchor)
+    }
+    
+    /// Brings back the edit document as it was left. (Undo history only survives when the
+    /// edit was still on screen, not when it was parked behind the scratch pad.)
+    private func resumeEdit(replacing anchor: NSRect?) {
+        if editorViewModel.buffer(scratch: false).isDirty { editorViewModel.origin = .restored }
+        editorViewModel.show(scratch: false)
+        presentEditorWindow(replacing: anchor)
+    }
+    
+    /// Saves text that's about to be replaced to history, so starting something new never
+    /// loses work.
+    private func stash(_ text: String, isScratch: Bool) {
         guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
         if SettingsManager.shared.pauseHistory {
             showToast("History is paused — previous text not kept")
@@ -289,6 +299,26 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         }
         historyManager.addEntry(text, isScratch: isScratch)
         showToast(isScratch ? "Scratch saved to History" : "Previous edit saved to History")
+    }
+    
+    /// Hides the editor at the user's request (Esc, ⌘W, the close button, the hotkey again).
+    func dismissEditor() {
+        closeEditor()
+        returnFocusIfIdle()
+    }
+    
+    /// Once no Mangle window is showing, hands focus back to the app the user came from —
+    /// otherwise Mangle stays active with nothing to type into until they click somewhere.
+    private func returnFocusIfIdle() {
+        DispatchQueue.main.async { [self] in
+            guard NSApp.isActive,
+                  ![editorWindow, historyWindow, settingsWindow].contains(where: { $0?.isVisible == true }) else { return }
+            if let app = previousApp, !app.isTerminated {
+                app.activate()
+            } else {
+                NSApp.hide(nil)
+            }
+        }
     }
     
     // MARK: - Presentation mode
@@ -324,6 +354,8 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     
     @objc func appDidResignActive() {
         clipboardChangeCountOnHide = NSPasteboard.general.changeCount
+        rememberSize(of: editorWindow, key: Self.editorSizeKey)
+        rememberSize(of: historyWindow, key: Self.historySizeKey)
         // While presenting, clicking another app (to run a demo) mustn't hide the editor.
         if !editorViewModel.isPresenting { editorWindow?.orderOut(nil) }
         historyWindow?.orderOut(nil)
@@ -392,9 +424,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             rememberFrontmostApp()
             let anchor = visibleWindowFrame()
             closeHistory()
-            loadEditor(text)
-            editorViewModel.sourceEntryID = nil
-            presentEditorWindow(replacing: anchor)
+            openEdit(text, origin: .clipboard, replacing: anchor)
         }
         func poll() {
             if pasteboard.changeCount != changeCountAtPress || Date() >= deadline {
@@ -412,20 +442,25 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
     
-    /// Persists unsaved editor text so it survives quitting; removes the draft otherwise.
+    /// Persists both documents so they survive quitting: the edit while it's unsaved, the
+    /// scratch pad while it has anything in it.
     private func saveDraft() {
-        guard pendingDraft == nil else { return }   // previous run's draft not yet restored
         let vm = editorViewModel
-        let text = vm.text
-        guard editorWindow != nil, vm.isDirty, !text.isEmpty else {
-            EditorDraft.clear()
-            return
+        let edit = vm.buffer(scratch: false)
+        let editDraft = edit.isDirty && !edit.text.isEmpty
+            ? EditorDraft(edit, clipboardChangeCount: clipboardChangeCountOnHide, isScratch: false) : nil
+        if editDraft != writtenEditDraft {
+            if let editDraft { editDraft.save() } else { EditorDraft.clear(scratch: false) }
+            writtenEditDraft = editDraft
         }
-        EditorDraft(
-            text: text, baseText: vm.baseText, language: vm.currentLanguage,
-            languageIsManual: vm.languageIsManual, sourceEntryID: vm.sourceEntryID,
-            clipboardChangeCount: clipboardChangeCountOnHide, isScratch: vm.isScratch
-        ).save()
+        let scratch = vm.buffer(scratch: true)
+        // The scratch pad's draft doesn't use the clipboard count, so leave it out of the
+        // comparison — otherwise every copy elsewhere would rewrite it.
+        let scratchDraft = scratch.text.isEmpty ? nil : EditorDraft(scratch, clipboardChangeCount: 0, isScratch: true)
+        if scratchDraft != writtenScratchDraft {
+            if let scratchDraft { scratchDraft.save() } else { EditorDraft.clear(scratch: true) }
+            writtenScratchDraft = scratchDraft
+        }
     }
     
     @objc func clearHistory() {
@@ -533,7 +568,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         hotKeyID1.id = 1
         let status1 = RegisterEventHotKey(settings.editorShortcut.keyCode, settings.editorShortcut.modifiers, hotKeyID1, GetApplicationEventTarget(), 0, &hotKeyRef)
         if status1 != noErr {
-            DispatchQueue.main.async { self.showToast("⚠️ Quick Edit shortcut conflict") }
+            DispatchQueue.main.async { self.showToast("⚠️ Open Editor shortcut conflict") }
         }
         
         var hotKeyID2 = EventHotKeyID()
@@ -541,7 +576,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         hotKeyID2.id = 2
         let status2 = RegisterEventHotKey(settings.historyShortcut.keyCode, settings.historyShortcut.modifiers, hotKeyID2, GetApplicationEventTarget(), 0, &historyHotKeyRef)
         if status2 != noErr {
-            DispatchQueue.main.async { self.showToast("⚠️ Show History shortcut conflict") }
+            DispatchQueue.main.async { self.showToast("⚠️ Recent Snippets shortcut conflict") }
         }
         
         var hotKeyID3 = EventHotKeyID()
@@ -549,11 +584,17 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         hotKeyID3.id = 3
         let status3 = RegisterEventHotKey(settings.scratchShortcut.keyCode, settings.scratchShortcut.modifiers, hotKeyID3, GetApplicationEventTarget(), 0, &scratchHotKeyRef)
         if status3 != noErr {
-            DispatchQueue.main.async { self.showToast("⚠️ New Scratch shortcut conflict") }
+            DispatchQueue.main.async { self.showToast("⚠️ Scratch Pad shortcut conflict") }
         }
     }
     
+    /// The history shortcut. Pressed while Recent Snippets is frontmost, it hides it.
     @objc func showHistory() {
+        if historyWindow?.isKeyWindow == true {
+            closeHistory()
+            returnFocusIfIdle()
+            return
+        }
         rememberFrontmostApp()
         closeSettings()
         
@@ -561,10 +602,9 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         // enlarged one — and a hidden editor isn't left in presentation mode.
         endPresentation(animate: false)
         
-        // If we have a preserved history window (user was editing a history entry),
-        // restore it rather than starting fresh
         let anchor = visibleWindowFrame()
-        if let hw = historyWindow {
+        // Back from editing one of its entries: return to the same list.
+        if let hw = historyWindow, editorViewModel.buffer(scratch: false).sourceEntryID != nil {
             editorWindow?.orderOut(nil)
             NSRunningApplication.current.activate(options: [.activateAllWindows, .activateIgnoringOtherApps])
             hw.makeKeyAndOrderFront(nil)
@@ -572,6 +612,8 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             return
         }
         
+        // Otherwise start fresh — no leftover search or selection from last time.
+        closeHistory()
         closeEditor()
         createHistoryWindow(replacing: anchor)
     }
@@ -582,13 +624,17 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             onSelectEntry: { [weak self] entry in
                 self?.loadEntryToEditor(entry)
             },
+            onPaste: { [weak self] entry in
+                self?.pasteFromHistory(entry)
+            },
             onClose: { [weak self] in
                 self?.closeHistory()
+                self?.returnFocusIfIdle()
             }
         )
         
         let window = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 700, height: 500),
+            contentRect: NSRect(origin: .zero, size: savedSize(key: Self.historySizeKey, default: NSSize(width: 700, height: 500))),
             styleMask: [.titled, .closable, .resizable],
             backing: .buffered,
             defer: false
@@ -601,6 +647,8 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         window.level = .floating
         window.isReleasedWhenClosed = false
         window.minSize = NSSize(width: 600, height: 400)
+        window.collectionBehavior = [.moveToActiveSpace, .fullScreenAuxiliary]
+        window.delegate = self
         
         self.historyWindow = window
         window.makeKeyAndOrderFront(nil)
@@ -640,75 +688,98 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     }
     
     func loadEntryToEditor(_ entry: HistoryEntry) {
-        loadEditor(entry.text, language: entry.language)
-        editorViewModel.sourceEntryID = entry.id
         // Hide but don't destroy — closing the editor returns here
         let anchor = historyWindow?.frame
         historyWindow?.orderOut(nil)
-        presentEditorWindow(replacing: anchor)
+        openEdit(entry.text, origin: .history, language: entry.language, sourceEntryID: entry.id, replacing: anchor)
+    }
+    
+    /// ⌘↩ / ⌘1–9 in Recent Snippets: pastes the entry into the app the user came from.
+    func pasteFromHistory(_ entry: HistoryEntry) {
+        let pasteboard = NSPasteboard.general
+        pasteboard.clearContents()
+        pasteboard.setString(entry.text, forType: .string)
+        closeHistory()
+        editorWindow?.orderOut(nil)
+        pasteIntoPreviousApp()
     }
     
     func closeHistory() {
+        if let window = historyWindow { rememberSize(of: window, key: Self.historySizeKey) }
         historyWindow?.close()
         historyWindow = nil
-        historyReturnAction = nil
-        historyCopyAction = nil
-        historyDeleteAction = nil
+        historyKeyHandler = nil
+        historyManager.forgetDeleted()
     }
     
-    func showEditor() {
-        // If our editor is already key window, don't reload — just focus it
+    /// The editor shortcut: opens the editor on the selection in the frontmost app, or the
+    /// clipboard, or brings back the unsaved edit when there's nothing new. Pressed while the
+    /// edit is frontmost it hides; over the scratch pad it switches to the edit.
+    /// From the menu bar it skips the simulated ⌘C.
+    func showEditor(fromMenu: Bool = false) {
+        let vm = editorViewModel
+        let pasteboard = NSPasteboard.general
         if editorWindow?.isKeyWindow == true {
+            if !vm.isScratch {
+                dismissEditor()
+            } else if vm.buffer(scratch: false).text.isEmpty {
+                openEdit(pasteboard.string(forType: .string) ?? "", origin: .clipboard, replacing: visibleWindowFrame())
+            } else {
+                resumeEdit(replacing: visibleWindowFrame())
+            }
             return
         }
+        // Still on screen behind another app (presentation mode): just bring it forward,
+        // rather than replacing what's being presented.
+        if let window = editorWindow, window.isVisible {
+            presentEditorWindow(replacing: window.frame)
+            return
+        }
+        
+        let sourceApp = NSWorkspace.shared.frontmostApplication
         rememberFrontmostApp()
         let anchor = visibleWindowFrame()
         
-        // If we were editing a history entry, restore the editor for that entry
-        if historyWindow != nil && editorViewModel.sourceEntryID != nil {
-            historyWindow?.orderOut(nil)
-            NSRunningApplication.current.activate(options: [.activateAllWindows, .activateIgnoringOtherApps])
-            editorWindow?.makeKeyAndOrderFront(nil)
-            if let anchor, let window = editorWindow { place(window, replacing: anchor) }
+        // Recent Snippets is frontmost: there's no selection to read, so use the clipboard —
+        // or, mid-way through editing one of its entries, go back to that.
+        if historyWindow?.isKeyWindow == true {
+            if vm.buffer(scratch: false).sourceEntryID != nil {
+                historyWindow?.orderOut(nil)
+                resumeEdit(replacing: anchor)
+            } else {
+                closeHistory()
+                openEdit(pasteboard.string(forType: .string) ?? "", origin: .clipboard, replacing: anchor)
+            }
             return
         }
+        closeHistory()
         
-        // If history is open (fresh, no entry being edited), close it and open editor from clipboard
-        if historyWindow != nil {
-            closeHistory()
-            loadEditor(NSPasteboard.general.string(forType: .string) ?? "")
-            presentEditorWindow(replacing: anchor)
-            return
-        }
-        
-        // Snapshot whether the editor has hidden unsaved content worth restoring
-        let hiddenContent = editorWindow == nil
-            ? pendingDraft?.text
-            : (editorWindow?.isVisible == false && !editorViewModel.text.isEmpty) ? editorViewModel.text : nil
+        let hasEdit = !vm.buffer(scratch: false).text.isEmpty
+        let clipboardChanged = pasteboard.changeCount != clipboardChangeCountOnHide
+        let selectionOrigin = EditorOrigin.selection(app: sourceApp == NSRunningApplication.current ? nil : sourceApp?.localizedName)
         
         // Try AX first — instant, no side effects
         if AXIsProcessTrusted(), let selected = selectedTextFromFrontmostApp(), !selected.isEmpty {
-            loadEditor(selected)
-            presentEditorWindow(replacing: anchor)
+            openEdit(selected, origin: selectionOrigin, replacing: anchor)
             return
         }
         
-        // Without AX permission, use clipboard directly (restore if nothing new)
-        guard AXIsProcessTrusted() else {
-            let clipboard = NSPasteboard.general.string(forType: .string) ?? ""
-            if let old = hiddenContent, NSPasteboard.general.changeCount == clipboardChangeCountOnHide {
-                restoreHiddenEditor(old, replacing: anchor)
+        // Nothing new to read: bring back the unsaved edit unless something's been copied
+        // since it was hidden.
+        guard AXIsProcessTrusted(), !fromMenu else {
+            if hasEdit, !clipboardChanged {
+                resumeEdit(replacing: anchor)
             } else {
-                loadEditor(clipboard)
-                presentEditorWindow(replacing: anchor)
+                openEdit(pasteboard.string(forType: .string) ?? "", origin: .clipboard, replacing: anchor)
             }
             return
         }
         
-        // Simulate Cmd+C — this also catches selections in apps that don't expose AX text
-        let pasteboard = NSPasteboard.general
+        // Simulate Cmd+C — this also catches selections in apps that don't expose AX text.
+        // What the user had copied is put back afterwards, when it's plain text.
         let previousText = pasteboard.string(forType: .string) ?? ""
         let savedChangeCount = pasteboard.changeCount
+        let savedItems = snapshotPasteboard()
         
         let src = CGEventSource(stateID: .hidSystemState)
         let dn = CGEvent(keyboardEventSource: src, virtualKey: 0x08, keyDown: true)
@@ -723,13 +794,18 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         let deadline = Date().addingTimeInterval(0.15)
         func finish() {
             let newText = pasteboard.string(forType: .string) ?? ""
-            let gotNewText = pasteboard.changeCount != savedChangeCount && !newText.isEmpty && newText != previousText
-            if let old = hiddenContent, !gotNewText {
-                // Nothing new from Cmd+C either — restore unsaved content
-                restoreHiddenEditor(old, replacing: anchor)
+            let copied = pasteboard.changeCount != savedChangeCount
+            let gotNewText = copied && !newText.isEmpty && newText != previousText
+            if copied, !savedItems.isEmpty {
+                pasteboard.clearContents()
+                pasteboard.writeObjects(savedItems)
+            }
+            if gotNewText {
+                openEdit(newText, origin: selectionOrigin, replacing: anchor)
+            } else if hasEdit, !clipboardChanged {
+                resumeEdit(replacing: anchor)
             } else {
-                loadEditor(gotNewText ? newText : previousText)
-                presentEditorWindow(replacing: anchor)
+                openEdit(previousText, origin: .clipboard, replacing: anchor)
             }
         }
         func poll() {
@@ -743,6 +819,28 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             }
         }
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.01) { poll() }
+    }
+    
+    /// A copy of the pasteboard, so it can be put back after a simulated ⌘C — but only when
+    /// it holds nothing but text. Apps like Excel and Photoshop render most of their formats
+    /// only when asked, so reading those could stall the hotkey for seconds; then the copy
+    /// is left in place instead (empty result).
+    private func snapshotPasteboard() -> [NSPasteboardItem] {
+        let items = NSPasteboard.general.pasteboardItems ?? []
+        let allText = items.allSatisfy { item in
+            item.types.allSatisfy { type in
+                guard let utType = UTType(type.rawValue) else { return false }
+                return utType.conforms(to: .text) || utType.conforms(to: .url)
+            }
+        }
+        guard allText else { return [] }
+        return items.map { item in
+            let copy = NSPasteboardItem()
+            for type in item.types {
+                if let data = item.data(forType: type) { copy.setData(data, forType: type) }
+            }
+            return copy
+        }
     }
     
     /// Reads the selected text from the currently frontmost app via the Accessibility API.
@@ -776,11 +874,6 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             createEditorWindow(replacing: anchor)
         }
         focusEditorTextView()
-        // Anything shown now supersedes a draft from the previous run.
-        if pendingDraft != nil {
-            pendingDraft = nil
-            EditorDraft.clear()
-        }
     }
     
     /// Make the text view first responder right away so the first keystrokes aren't lost.
@@ -801,10 +894,11 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     func createEditorWindow(replacing anchor: NSRect? = nil) {
         let contentView = EditorView(viewModel: editorViewModel, onSave: { [weak self] in
             self?.saveToClipboard()
+            self?.returnFocusIfIdle()
         }, onSaveAndPaste: { [weak self] in
             self?.saveAndPaste()
         }, onClose: { [weak self] in
-            self?.closeEditor()
+            self?.dismissEditor()
         }, onNewScratch: { [weak self] in
             self?.newScratch()
         }, onTogglePresentation: { [weak self] in
@@ -812,19 +906,25 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         })
         
         let window = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 680, height: 480),
+            contentRect: NSRect(origin: .zero, size: savedSize(key: Self.editorSizeKey, default: NSSize(width: 680, height: 480))),
             styleMask: [.titled, .closable, .resizable],
             backing: .buffered,
             defer: false
         )
         
         place(window, replacing: anchor)
-        window.title = "Mangle"
+        window.identifier = NSUserInterfaceItemIdentifier("editor")
         window.contentView = NSHostingView(rootView: contentView)
         window.level = .floating
         window.isReleasedWhenClosed = false
         window.isRestorable = false
-        window.collectionBehavior = [.moveToActiveSpace]
+        // Full-screen auxiliary so it opens over a full-screen app instead of switching Spaces.
+        window.collectionBehavior = [.moveToActiveSpace, .fullScreenAuxiliary]
+        window.delegate = self
+        titleObserver = editorViewModel.$isScratch.combineLatest(editorViewModel.$origin)
+            .sink { [weak window] isScratch, origin in
+                window?.title = isScratch ? "Scratch Pad" : origin.title
+            }
         
         self.editorWindow = window
         NSRunningApplication.current.activate(options: [.activateAllWindows, .activateIgnoringOtherApps])
@@ -833,14 +933,19 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     
     /// Copies, closes, then switches back to the app the text came from and pastes it there.
     func saveAndPaste() {
-        let target = previousApp
         saveToClipboard(toast: nil)
-        guard let target, !target.isTerminated else {
+        pasteIntoPreviousApp()
+    }
+    
+    /// Switches back to the app the user came from and pastes the clipboard there.
+    private func pasteIntoPreviousApp() {
+        guard let target = previousApp, !target.isTerminated else {
             showToast("Copied to clipboard")
             return
         }
         guard AXIsProcessTrusted() else {
             showToast("Copied — enable Accessibility to paste automatically")
+            target.activate()
             return
         }
         target.activate()
@@ -878,16 +983,17 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             historyManager.updateLanguage(for: sourceID, language: editorViewModel.currentLanguage)
         }
         
-        // Save to history (unless paused)
+        // Save to history (unless paused). Saving an edit of a history entry updates it.
         if !SettingsManager.shared.pauseHistory {
-            historyManager.addEntry(editorViewModel.text, isScratch: editorViewModel.isScratch)
+            historyManager.addEntry(editorViewModel.text, isScratch: editorViewModel.isScratch,
+                                    replacing: editorViewModel.sourceEntryID)
         }
         
         editorViewModel.sourceEntryID = nil
         editorViewModel.markSaved()
         closeHistory()
         closeEditor()
-        EditorDraft.clear()
+        saveDraft()
         if let toast { showToast(toast) }
     }
     
@@ -1020,23 +1126,6 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
     
-    /// Re-show the hidden editor as-is. It still holds the unsaved text, so there's nothing to
-    /// reload — reloading used to reset the dirty baseline, cursor position and undo history.
-    private func restoreHiddenEditor(_ text: String, replacing anchor: NSRect? = nil) {
-        guard let window = editorWindow else {
-            // Fresh launch: restore the previous run's unsaved draft.
-            if let draft = pendingDraft {
-                editorViewModel.restore(draft)
-                presentEditorWindow(replacing: anchor)
-            }
-            return
-        }
-        NSRunningApplication.current.activate(options: [.activateAllWindows, .activateIgnoringOtherApps])
-        window.makeKeyAndOrderFront(nil)
-        if !editorViewModel.isPresenting { place(window, replacing: anchor) }
-        focusEditorTextView()
-    }
-    
     func closeEditor() {
         endPresentation(animate: false)
         let anchor = editorWindow?.isVisible == true ? editorWindow?.frame : nil
@@ -1055,6 +1144,41 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     
     func closeSettings() {
         settingsWindow?.close()
+    }
+    
+    // MARK: - Window delegate
+    
+    /// The close button hides, the same as Esc, rather than closing.
+    func windowShouldClose(_ sender: NSWindow) -> Bool {
+        if sender === editorWindow {
+            if let requestClose = editorViewModel.requestClose { requestClose() } else { dismissEditor() }
+            return false
+        }
+        if sender === historyWindow {
+            closeHistory()
+            returnFocusIfIdle()
+            return false
+        }
+        return true
+    }
+    
+    func windowDidEndLiveResize(_ notification: Notification) {
+        guard let window = notification.object as? NSWindow else { return }
+        if window === editorWindow { rememberSize(of: window, key: Self.editorSizeKey) }
+        if window === historyWindow { rememberSize(of: window, key: Self.historySizeKey) }
+    }
+    
+    /// Window sizes (not positions — windows open by the cursor) are kept across launches.
+    private func rememberSize(of window: NSWindow?, key: String) {
+        guard let window else { return }
+        if window === editorWindow, editorViewModel.isPresenting { return }
+        UserDefaults.standard.set(NSStringFromSize(window.frame.size), forKey: key)
+    }
+    
+    private func savedSize(key: String, default size: NSSize) -> NSSize {
+        guard let string = UserDefaults.standard.string(forKey: key) else { return size }
+        let saved = NSSizeFromString(string)
+        return saved.width >= 400 && saved.height >= 300 ? saved : size
     }
 }
 

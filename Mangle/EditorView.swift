@@ -335,9 +335,6 @@ struct EditorView: View {
     @State private var paletteIndex = 0
     @State private var hoverPaste = false
     
-    // Feature 3 – Unsaved changes warning
-    @State private var showCancelAlert = false
-
     // Smart-select / expand selection (⌥⇧↑ expand, ⌥⇧↓ shrink)
     @State private var selectionHistory: [NSRange] = []
     @State private var lastExpandResult: NSRange? = nil
@@ -388,6 +385,7 @@ struct EditorView: View {
             
             CustomTextEditor(
                 text: viewModel.loadedText,
+                selection: viewModel.loadedSelection,
                 loadGeneration: viewModel.loadGeneration,
                 language: viewModel.currentLanguage,
                 fontSize: viewModel.isPresenting ? settings.presentationFontSize : settings.fontSize,
@@ -401,6 +399,7 @@ struct EditorView: View {
                     textView = tv
                     viewModel.textView = tv
                 },
+                onLoadApplied: { viewModel.appliedGeneration = $0 },
                 onTextChange: {
                     // Keep find highlights/count in sync with edits (debounced by the editor).
                     if showFindBar { highlightMatches() }
@@ -488,6 +487,7 @@ struct EditorView: View {
             }
         }
         .onAppear {
+            viewModel.requestClose = cancelEditor
             if let monitor = keyMonitor { NSEvent.removeMonitor(monitor) }
             keyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [self] event in
                 // Local monitors see keys for every window in the app. The editor window is
@@ -496,22 +496,6 @@ struct EditorView: View {
                 guard let editorWindow = textView?.window, event.window === editorWindow else { return event }
                 let mods = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
                 
-                // When discard alert is open, intercept its shortcuts first
-                if showCancelAlert {
-                    if event.keyCode == 53 { // Escape
-                        showCancelAlert = false
-                        return nil
-                    }
-                    if mods == .command && event.charactersIgnoringModifiers == "d" {
-                        showCancelAlert = false
-                        closeFindBar()
-                        onClose()
-                        viewModel.discard()
-                        return nil
-                    }
-                    return nil // swallow all other keys while alert is open
-                }
-
                 // If focus went somewhere else (the document after a click, or the find bar),
                 // the palette is done — keys must reach that field, not run palette commands.
                 if showPalette, textView?.window?.firstResponder === textView || isFindFieldFocused || isReplaceFieldFocused {
@@ -602,6 +586,7 @@ struct EditorView: View {
                 if mods == [.command, .shift], key == "p" { openPalette(); return nil }
                 if mods == .control, key == "g" { openPalette(query: ":"); return nil }
                 if mods == .command, key == "n" { onNewScratch(); return nil }
+                if mods == .command, key == "w" { cancelEditor(); return nil }
                 if mods == .command, key == "t" { showTransformMenu(); return nil }
                 if mods == [.command, .option], key == "p" { onTogglePresentation(); return nil }
                 
@@ -685,66 +670,6 @@ struct EditorView: View {
                 keyMonitor = nil
             }
         }
-        .overlay {
-            if showCancelAlert {
-                ZStack {
-                    Color.black.opacity(0.35)
-                        .ignoresSafeArea()
-                    
-                    VStack(spacing: 0) {
-                        Divider()
-                        HStack(spacing: 0) {
-                            Text("Discard unsaved changes?")
-                                .font(.system(size: 12))
-                                .foregroundColor(.secondary)
-                                .padding(.horizontal, 14)
-                            
-                            Spacer()
-                            
-                            barDivider
-                            
-                            // Keep Editing
-                            Button { showCancelAlert = false } label: {
-                                bottomAction("Keep Editing", shortcut: "Esc")
-                            }
-                            .buttonStyle(.plain)
-                            .keyboardShortcut(.escape, modifiers: [])
-                            .padding(.horizontal, 8)
-                            
-                            barDivider
-                            
-                            // Discard
-                            Button {
-                                showCancelAlert = false
-                                closeFindBar()
-                                onClose()
-                                viewModel.discard()
-                            } label: {
-                                HStack(alignment: .firstTextBaseline, spacing: 6) {
-                                    Text("Discard")
-                                        .fontWeight(.medium)
-                                        .foregroundColor(.red.opacity(0.85))
-                                    Text("⌘D")
-                                        .font(.system(size: 10, weight: .medium))
-                                        .foregroundColor(.secondary)
-                                }
-                                .font(.system(size: 12))
-                                .fixedSize()
-                                .padding(.horizontal, 6)
-                                .padding(.vertical, 3)
-                                .cornerRadius(5)
-                            }
-                            .buttonStyle(.plain)
-                            .keyboardShortcut("d", modifiers: .command)
-                            .padding(.horizontal, 8)
-                        }
-                        .frame(height: 36)
-                        .background(Color(nsColor: .windowBackgroundColor))
-                    }
-                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .bottom)
-                }
-            }
-        }
     }
     
     // MARK: - Accessibility Banner
@@ -760,7 +685,7 @@ struct EditorView: View {
                     .foregroundColor(.secondary)
                 Spacer()
                 Button("Enable in Settings") {
-                    if let window = NSApp.windows.first(where: { $0.title == "Mangle" }) {
+                    if let window = NSApp.windows.first(where: { $0.identifier?.rawValue == "editor" }) {
                         window.level = .normal
                         DispatchQueue.main.asyncAfter(deadline: .now() + 2) {
                             if !AXIsProcessTrusted() { window.level = .floating }
@@ -1031,12 +956,14 @@ struct EditorView: View {
             barDivider
 
             HStack(spacing: 4) {
-                // Cancel with unsaved-changes guard. A scratch pad just hides: its text
-                // comes back with the scratch shortcut, and goes to history when replaced.
+                // Hiding never loses anything: the hotkey brings the text back, and it goes to
+                // history if something replaces it.
                 Button(action: cancelEditor) {
-                    bottomAction(viewModel.isScratch ? "Hide" : "Cancel", shortcut: showBadges ? "Esc" : nil, hovered: hoverCancel)
+                    bottomAction("Hide", shortcut: showBadges ? "Esc" : nil, hovered: hoverCancel)
                 }
-                .help(viewModel.isScratch ? "Hide the scratch pad — it comes back where you left it (Esc)" : "Cancel (Esc)")
+                .help(viewModel.isScratch
+                      ? "Hide the scratch pad — it comes back where you left it (Esc)"
+                      : "Hide — the hotkey brings this back, and it's kept in history if replaced (Esc)")
                 .buttonStyle(.plain)
                 .keyboardShortcut(.escape, modifiers: [])
                 .onHover { hoverCancel = $0 }
@@ -1466,15 +1393,19 @@ struct EditorView: View {
         UserDefaults.standard.set(useRegex, forKey: Self.lastFindRegexKey)
     }
 
-    /// Cancel / Esc: asks before throwing away edits; a scratch pad just hides — its text
-    /// comes back with the scratch shortcut, and goes to history when replaced.
+    /// Esc / ⌘W: hides the editor. Unsaved text stays — the hotkey brings it back, and it's
+    /// kept in history if something replaces it — so there's nothing to confirm.
     private func cancelEditor() {
         closeFindBar()
-        if viewModel.isDirty && !viewModel.isScratch {
-            showCancelAlert = true
-        } else {
-            onClose()
-        }
+        onClose()
+    }
+
+    /// Palette only — no shortcut, so it can't be hit by accident next to ⌘⌫ / ⌥⌫.
+    /// Throws the document on screen away and hides the editor.
+    private func discardDocument() {
+        closeFindBar()
+        onClose()
+        viewModel.discard()
     }
 
     private func closeFindBar() {
@@ -1589,13 +1520,9 @@ struct EditorView: View {
                           detail: viewModel.isScratch ? "Not available for scratch pads" : (viewModel.isDirty ? nil : "No changes yet"),
                           run: revertToOriginal),
             EditorCommand(title: "New Scratch", section: "File", shortcut: "⌘N", run: onNewScratch),
-            EditorCommand(title: "Discard Scratch", section: "File", isEnabled: viewModel.isScratch,
-                          detail: viewModel.isScratch ? nil : "Only for scratch pads") {
-                closeFindBar()
-                onClose()
-                viewModel.discard()
-            },
-            EditorCommand(title: viewModel.isScratch ? "Hide Scratch Pad" : "Close Editor", section: "File", shortcut: "Esc",
+            EditorCommand(title: viewModel.isScratch ? "Discard Scratch Pad" : "Discard Edit", section: "File",
+                          key: "File/Discard", run: discardDocument),
+            EditorCommand(title: viewModel.isScratch ? "Hide Scratch Pad" : "Hide Editor", section: "File", shortcut: "Esc",
                           key: "File/Close", run: cancelEditor),
             EditorCommand(title: undoManager?.undoMenuItemTitle ?? "Undo", section: "Edit", shortcut: "⌘Z",
                           isEnabled: undoManager?.canUndo == true, detail: undoManager?.canUndo == true ? nil : "Nothing to undo",
@@ -2686,6 +2613,8 @@ struct CustomTextEditor: NSViewRepresentable {
     /// Text to push into the editor when `loadGeneration` changes. While editing, the text
     /// view itself is the source of truth — keystrokes don't round-trip through SwiftUI.
     var text: String
+    /// Where to put the caret when `text` is applied (switching back to a parked document).
+    var selection = NSRange(location: 0, length: 0)
     var loadGeneration: Int
     var language: String
     var fontSize: CGFloat
@@ -2697,6 +2626,8 @@ struct CustomTextEditor: NSViewRepresentable {
     /// Presentation mode: no line numbers (fold chevrons stay) and roomier margins.
     var isPresenting = false
     var onTextViewReady: ((NSTextView) -> Void)?
+    /// Called with the generation once its text is in the text view.
+    var onLoadApplied: ((Int) -> Void)?
     /// Called (debounced) after the text changes.
     var onTextChange: (() -> Void)?
     /// Called after a paste that filled an empty document or replaced all of it.
@@ -2951,6 +2882,7 @@ struct CustomTextEditor: NSViewRepresentable {
             appliedGeneration = generation
             guard let storage = codeStorage else {
                 textView.string = text
+                parent.onLoadApplied?(generation)
                 return
             }
             isApplyingProgrammaticChange = true
@@ -2981,9 +2913,13 @@ struct CustomTextEditor: NSViewRepresentable {
                 mtv.indentation = indentation
                 publishStatus { if $0.indentation != indentation { $0.indentation = indentation } }
             }
-            textView.setSelectedRange(NSRange(location: 0, length: 0))
-            textView.scrollRangeToVisible(NSRange(location: 0, length: 0))
+            let length = (text as NSString).length
+            let location = min(parent.selection.location, length)
+            let selection = NSRange(location: location, length: min(parent.selection.length, length - location))
+            textView.setSelectedRange(selection)
+            textView.scrollRangeToVisible(selection)
             isApplyingProgrammaticChange = false
+            parent.onLoadApplied?(generation)
             
             updateCursor(in: textView)
             scheduleTextChange(for: textView, delay: 0)
@@ -3682,7 +3618,7 @@ private struct ShortcutsPopover: View {
             ("⌘ S",        "Save to clipboard"),
             ("⌘ ↩",        "Save and paste into previous app"),
             ("⌘ N",        "New scratch pad"),
-            ("Esc",        "Close editor"),
+            ("Esc  ⌘ W",   "Hide editor"),
         ]),
         ("Editing", [
             ("⌘ Z",        "Undo"),

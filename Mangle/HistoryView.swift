@@ -16,16 +16,17 @@ private func formatRelativeDate(_ date: Date) -> String {
 struct HistoryView: View {
     @ObservedObject var historyManager: HistoryManager
     var onSelectEntry: (HistoryEntry) -> Void
+    var onPaste: (HistoryEntry) -> Void = { _ in }
     var onClose: () -> Void
     
     @State private var selectedEntry: HistoryEntry?
     @State private var searchText = ""
     @State private var hoverCopy = false
+    @State private var hoverPaste = false
     @State private var hoverEdit = false
     @State private var hoverDelete = false
     @State private var lastTapEntry: HistoryEntry.ID? = nil
     @State private var lastTapTime: Date = .distantPast
-    @State private var keyMonitor: Any? = nil
     @FocusState private var searchFocused: Bool
     @Environment(\.colorScheme) private var colorScheme
     
@@ -54,22 +55,17 @@ struct HistoryView: View {
         .frame(minWidth: 640, minHeight: 420)
         .onAppear {
             selectedEntry = filteredEntries.first
-            syncSelectedEntry()
-            if let m = keyMonitor { NSEvent.removeMonitor(m); keyMonitor = nil }
-            keyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [self] event in
-                guard NSApp.keyWindow?.identifier?.rawValue == "history" else { return event }
-                switch event.keyCode {
-                case 125: searchFocused = false; navigateSelection(by: +1); return nil  // ↓
-                case 126: searchFocused = false; navigateSelection(by: -1); return nil  // ↑
-                case 36 where searchFocused: searchFocused = false; return nil          // Return
-                default: return event
-                }
-            }
+            // The app delegate's key monitor hands this window's keys here. Registering a
+            // handler (rather than a monitor per view) means a replaced window's view can't
+            // keep handling keys for the new one.
+            AppDelegate.shared?.historyKeyHandler = handleKey
         }
-        .onDisappear {
-            if let m = keyMonitor { NSEvent.removeMonitor(m); keyMonitor = nil }
+        .onChange(of: searchText) {
+            // Keep the selection on a visible entry so Return/⌘↩ act on what's shown.
+            let entries = filteredEntries
+            if let selected = selectedEntry, entries.contains(where: { $0.id == selected.id }) { return }
+            selectedEntry = entries.first
         }
-        .onChange(of: selectedEntry) { syncSelectedEntry() }
         .onChange(of: historyManager.entries) {
             if let selected = selectedEntry {
                 if !historyManager.entries.contains(where: { $0.id == selected.id }) {
@@ -81,6 +77,93 @@ struct HistoryView: View {
         }
     }
     
+    /// Every key pressed while Recent Snippets is the key window. Returns nil when handled.
+    private func handleKey(_ event: NSEvent) -> NSEvent? {
+        // Mid-composition with an input method (Japanese, Chinese…), Return and Esc belong
+        // to the search field: they confirm or cancel the characters being composed.
+        if let editor = event.window?.firstResponder as? NSTextView, editor.hasMarkedText() { return event }
+        let mods = event.modifierFlags.intersection([.command, .shift, .option, .control])
+        let key = event.charactersIgnoringModifiers?.lowercased()
+        // Ask AppKit rather than trusting `searchFocused` alone: type-to-search focuses the
+        // field directly, and SwiftUI's copy of that can lag a keystroke behind.
+        let inSearch = searchFocused || (event.window?.firstResponder as? NSTextView)?.isFieldEditor == true
+        switch event.keyCode {
+        case 53: // Escape clears a search first, then closes
+            if !searchText.isEmpty { searchText = ""; return nil }
+            onClose()
+            return nil
+        case 125 where mods.isEmpty: leaveSearch(event); navigateSelection(by: +1); return nil  // ↓
+        case 126 where mods.isEmpty: leaveSearch(event); navigateSelection(by: -1); return nil  // ↑
+        case 36, 76: // Return edits, ⌘Return pastes — from the search field too
+            if let entry = selectedEntry {
+                mods == .command ? onPaste(entry) : onSelectEntry(entry)
+            }
+            return nil
+        case 51 where mods.isEmpty && !inSearch: // Delete
+            if let entry = selectedEntry { deleteEntry(entry) }
+            return nil
+        default: break
+        }
+        if mods == .command, let key {
+            switch key {
+            case "w": onClose(); return nil
+            case "c": if let entry = selectedEntry { copyAndClose(entry) }; return nil
+            case "f": searchFocused = true; return nil
+            case "p": if let entry = selectedEntry { historyManager.togglePin(entry) }; return nil
+            case "z" where !inSearch: undoDelete(); return nil
+            case "1"..."9":
+                let entries = filteredEntries
+                if let n = Int(key), entries.indices.contains(n - 1) { onPaste(entries[n - 1]) }
+                return nil
+            default:
+                // App-wide shortcuts and the search field's own (⌘A, ⌘V…) still work; anything
+                // else would only beep at the list.
+                return inSearch || "qhm,".contains(key) ? event : nil
+            }
+        }
+        guard !inSearch else { return event }
+        // Typing anywhere searches: focus the field now and let it take this key itself, so
+        // no keystroke can land before the field is ready. A leading space is ignored — it
+        // would match nearly everything.
+        if mods.subtracting(.shift).isEmpty, let chars = event.characters, !chars.isEmpty,
+           chars.unicodeScalars.allSatisfy({ !CharacterSet.controlCharacters.contains($0) && !(0xF700...0xF8FF).contains($0.value) }) {
+            if searchText.isEmpty, chars.allSatisfy(\.isWhitespace) { return nil }
+            guard let window = event.window, let field = Self.searchField(in: window.contentView) else { return nil }
+            window.makeFirstResponder(field)
+            // Becoming first responder selects the field's text; type after it instead.
+            (field.currentEditor() as? NSTextView)?.moveToEndOfDocument(nil)
+            return event
+        }
+        // List navigation keys reach the list; anything else would only beep.
+        let listKeys: Set<UInt16> = [48, 115, 116, 119, 121, 123, 124] // Tab, Home, PgUp, End, PgDn, ←, →
+        return listKeys.contains(event.keyCode) ? event : nil
+    }
+
+    /// Moves focus off the search field, back to the list.
+    private func leaveSearch(_ event: NSEvent) {
+        searchFocused = false
+        if (event.window?.firstResponder as? NSTextView)?.isFieldEditor == true {
+            event.window?.makeFirstResponder(nil)
+        }
+    }
+
+    /// The search box's text field (the only editable one in the window).
+    private static func searchField(in view: NSView?) -> NSTextField? {
+        guard let view else { return nil }
+        if let field = view as? NSTextField, field.isEditable { return field }
+        for subview in view.subviews {
+            if let field = searchField(in: subview) { return field }
+        }
+        return nil
+    }
+
+    private func undoDelete() {
+        guard let entry = historyManager.undoDelete() else { return }
+        searchText = ""
+        selectedEntry = entry
+        AppDelegate.shared?.showToast("Restored")
+    }
+
     private func navigateSelection(by offset: Int) {
         let entries = filteredEntries
         guard !entries.isEmpty else { return }
@@ -148,9 +231,21 @@ struct HistoryView: View {
                     bottomAction("Copy", shortcut: "⌘C", hovered: hoverCopy)
                 }
                 .buttonStyle(.plain)
-                .keyboardShortcut("c", modifiers: .command)
                 .padding(.horizontal, 8)
                 .onHover { hoverCopy = $0 }
+                
+                barDivider
+                
+                // Paste
+                Button {
+                    if let entry = selectedEntry { onPaste(entry) }
+                } label: {
+                    bottomAction("Paste", shortcut: "⌘↩", hovered: hoverPaste)
+                }
+                .buttonStyle(.plain)
+                .padding(.horizontal, 8)
+                .onHover { hoverPaste = $0 }
+                .help("Paste into the app you came from (⌘↩, or ⌘1–⌘9 for the first nine)")
                 
                 barDivider
                 
@@ -228,14 +323,15 @@ struct HistoryView: View {
                 emptyState(
                     icon: searchText.isEmpty ? "doc.text" : "magnifyingglass",
                     title: searchText.isEmpty ? "No History" : "No Results",
-                    subtitle: searchText.isEmpty ? "Saved edits will appear here" : "No entries match your search"
+                    subtitle: searchText.isEmpty ? "Saved edits will appear here" : "No entries match your search — Esc clears it"
                 )
             } else {
                 ScrollViewReader { proxy in
                     List(selection: $selectedEntry) {
-                        ForEach(entries) { entry in
+                        ForEach(Array(entries.enumerated()), id: \.element.id) { index, entry in
                             let isSelected = selectedEntry?.id == entry.id
-                            HistoryEntryRow(entry: entry, meta: historyManager.meta(for: entry), isSelected: isSelected)
+                            HistoryEntryRow(entry: entry, meta: historyManager.meta(for: entry), isSelected: isSelected,
+                                            pasteShortcut: index < 9 ? "⌘\(index + 1)" : nil)
                                 .contentShape(Rectangle())
                                 .onTapGesture {
                                     NSApp.keyWindow?.makeFirstResponder(nil)
@@ -254,10 +350,11 @@ struct HistoryView: View {
                                     : Color.clear.cornerRadius(6)
                                 )
                                 .contextMenu {
+                                    Button("Paste") { onPaste(entry) }
                                     Button("Copy to Clipboard") { copyAndClose(entry) }
                                     Button("Edit") { onSelectEntry(entry) }
                                     Divider()
-                                    Button(entry.isPinned ? "Unpin" : "Pin") {
+                                    Button(entry.isPinned ? "Unpin (⌘P)" : "Pin (⌘P)") {
                                         historyManager.togglePin(entry)
                                     }
                                     Divider()
@@ -290,7 +387,7 @@ struct HistoryView: View {
             Image(systemName: "magnifyingglass")
                 .foregroundColor(AppTheme.tealSUI)
                 .imageScale(.small)
-            TextField("Search history…", text: $searchText)
+            TextField("Type to search…", text: $searchText)
                 .textFieldStyle(.plain)
                 .focused($searchFocused)
             if !searchText.isEmpty {
@@ -351,23 +448,6 @@ struct HistoryView: View {
         AppDelegate.shared?.showToast("Copied to clipboard")
     }
     
-    private func syncSelectedEntry() {
-        let entry = selectedEntry
-        let callback = onSelectEntry
-        AppDelegate.shared?.historyReturnAction = {
-            if let entry = entry { callback(entry) }
-        }
-        AppDelegate.shared?.historyCopyAction = { [self] in
-            if let entry = entry { copyAndClose(entry) }
-        }
-        AppDelegate.shared?.historyDeleteAction = { [self] in
-            if let entry = entry { deleteEntry(entry) }
-        }
-        AppDelegate.shared?.historyFocusSearchAction = { [self] in
-            searchFocused = true
-        }
-    }
-    
     private func deleteEntry(_ entry: HistoryEntry) {
         if selectedEntry?.id == entry.id {
             if let index = filteredEntries.firstIndex(where: { $0.id == entry.id }) {
@@ -383,6 +463,7 @@ struct HistoryView: View {
             }
         }
         historyManager.deleteEntry(entry)
+        AppDelegate.shared?.showToast("Deleted — ⌘Z to undo")
     }
 }
 
@@ -392,6 +473,8 @@ struct HistoryEntryRow: View {
     let entry: HistoryEntry
     let meta: HistoryEntryMeta
     var isSelected: Bool = false
+    /// "⌘1"…"⌘9" for the first nine rows, which those keys paste.
+    var pasteShortcut: String? = nil
     
     private var preview: String { meta.preview }
     private var secondLine: String? { meta.secondLine }
@@ -448,6 +531,12 @@ struct HistoryEntryRow: View {
                         .foregroundColor(entry.language != nil
                                          ? (isSelected ? AppTheme.tealSUI.opacity(0.9) : AppTheme.tealSUI)
                                          : .secondary)
+                }
+                if let pasteShortcut {
+                    Spacer(minLength: 4)
+                    Text(pasteShortcut)
+                        .font(.system(size: 9, weight: .medium))
+                        .foregroundColor(.secondary.opacity(0.6))
                 }
             }
         }

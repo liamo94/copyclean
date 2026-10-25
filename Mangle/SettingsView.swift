@@ -368,9 +368,9 @@ struct SettingsView: View {
                 }
                 .help("Copy, then press ⌘C again quickly to open the copied text in the editor. Requires Accessibility access.")
                 Divider()
-                ShortcutRecorder(title: "Quick Edit", shortcut: $editorShortcut)
-                ShortcutRecorder(title: "Show History", shortcut: $historyShortcut)
-                ShortcutRecorder(title: "New Scratch", shortcut: $scratchShortcut)
+                ShortcutRecorder(title: "Open Editor", shortcut: $editorShortcut)
+                ShortcutRecorder(title: "Recent Snippets", shortcut: $historyShortcut)
+                ShortcutRecorder(title: "Scratch Pad", shortcut: $scratchShortcut)
             }
             .padding()
             .background(Color(nsColor: .controlBackgroundColor))
