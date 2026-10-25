@@ -33,10 +33,11 @@ final class PrettierFormatter: @unchecked Sendable {
     
     // MARK: Public
     
-    /// Languages that can be formatted.
+    /// Languages that can be formatted. "xml" is included because the app (and Highlightr)
+    /// represents HTML as "xml" everywhere — it's aliased to the html parser below.
     static let supportedLanguages: Set<String> = [
         "javascript", "typescript", "css", "scss", "less",
-        "html", "markdown", "yaml", "graphql"
+        "html", "xml", "markdown", "yaml", "graphql", "json"
     ]
     
     func canFormat(language: String) -> Bool {
@@ -143,10 +144,11 @@ final class PrettierFormatter: @unchecked Sendable {
         case "css":               return "css"
         case "scss":              return "scss"
         case "less":              return "less"
-        case "html":              return "html"
+        case "html", "xml":       return "html"
         case "markdown":          return "markdown"
         case "yaml":              return "yaml"
         case "graphql":           return "graphql"
+        case "json":              return "json"
         default:                  return nil
         }
     }
