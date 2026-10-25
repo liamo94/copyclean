@@ -483,18 +483,21 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMenuDele
     }
     
     func createSettingsWindow() {
-        let contentView = SettingsView()
+        // Fit the content, but scroll rather than run off a short screen.
+        let screen = screenAtCursor()
+        let fitting = NSHostingView(rootView: SettingsView()).fittingSize
+        let height = min(fitting.height, screen.visibleFrame.height - 40)
         
         let window = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 350, height: 840),
+            contentRect: NSRect(x: 0, y: 0, width: fitting.width, height: height),
             styleMask: [.titled, .closable],
             backing: .buffered,
             defer: false
         )
         
-        centerWindow(window, on: screenAtCursor())
+        centerWindow(window, on: screen)
         window.title = "Mangle Settings"
-        window.contentView = NSHostingView(rootView: contentView)
+        window.contentView = NSHostingView(rootView: ScrollView { SettingsView() })
         window.isReleasedWhenClosed = false
         
         self.settingsWindow = window

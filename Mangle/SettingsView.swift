@@ -356,6 +356,24 @@ struct SettingsView: View {
     
     var body: some View {
         VStack(spacing: 20) {
+            HStack(spacing: 10) {
+                Image("MenuBarIcon")
+                    .renderingMode(.template)
+                    .resizable()
+                    .scaledToFit()
+                    .frame(width: 32, height: 32)
+                    .foregroundStyle(.secondary)
+                VStack(alignment: .leading, spacing: 1) {
+                    Text("Mangle")
+                        .font(.title3.weight(.semibold))
+                    if let version = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String {
+                        Text("Version \(version)")
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                    }
+                }
+            }
+            
             Text("Keyboard Shortcuts")
                 .font(.headline)
             
@@ -506,8 +524,6 @@ struct SettingsView: View {
             .background(Color(nsColor: .controlBackgroundColor))
             .cornerRadius(8)
             
-            Spacer()
-            
             HStack {
                 Spacer()
                 
@@ -537,10 +553,9 @@ struct SettingsView: View {
                 .keyboardShortcut(.defaultAction)
                 .buttonStyle(.borderedProminent)
             }
-            .padding(.bottom, 20)
         }
         .padding()
-        .frame(width: 350, height: 840)
+        .frame(width: 350)
         .tint(AppTheme.tealSUI)
     }
     
