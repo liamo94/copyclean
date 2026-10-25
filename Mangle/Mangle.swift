@@ -30,9 +30,19 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     var historyFocusSearchAction: (() -> Void)?
     var keyEventMonitor: Any?
     var clipboardChangeCountOnHide: Int = 0
+    /// The app that was frontmost when the editor/history opened — Save & Paste returns to it.
+    private var previousApp: NSRunningApplication?
+    /// Unsaved editor text from the previous run, restored by the next hotkey press when
+    /// there's no new selection or clipboard content (same rules as a hidden editor).
+    private var pendingDraft: EditorDraft?
     
     func applicationDidFinishLaunching(_ notification: Notification) {
         AppDelegate.shared = self
+        
+        if let draft = EditorDraft.load() {
+            pendingDraft = draft
+            clipboardChangeCountOnHide = draft.clipboardChangeCount
+        }
         
         // Setup settings callback
         SettingsManager.shared.onShortcutsChanged = { [weak self] in
@@ -120,6 +130,8 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     }
     
     func applicationWillTerminate(_ notification: Notification) {
+        historyManager.flush()
+        saveDraft()
         if let monitor = keyEventMonitor {
             NSEvent.removeMonitor(monitor)
             keyEventMonitor = nil
@@ -163,11 +175,11 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     }
     
     @objc func showEditorFromMenu() {
+        rememberFrontmostApp()
         closeHistory()
         let text = (AXIsProcessTrusted() ? selectedTextFromFrontmostApp() : nil) ?? NSPasteboard.general.string(forType: .string) ?? ""
         editorViewModel.load(text)
         editorViewModel.sourceEntryID = nil
-        editorViewModel.languageIsManual = false
         presentEditorWindow()
     }
     
@@ -175,6 +187,29 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         clipboardChangeCountOnHide = NSPasteboard.general.changeCount
         editorWindow?.orderOut(nil)
         historyWindow?.orderOut(nil)
+        saveDraft()
+    }
+    
+    private func rememberFrontmostApp() {
+        if let app = NSWorkspace.shared.frontmostApplication, app != NSRunningApplication.current {
+            previousApp = app
+        }
+    }
+    
+    /// Persists unsaved editor text so it survives quitting; removes the draft otherwise.
+    private func saveDraft() {
+        guard pendingDraft == nil else { return }   // previous run's draft not yet restored
+        let vm = editorViewModel
+        let text = vm.text
+        guard editorWindow != nil, vm.isDirty, !text.isEmpty else {
+            EditorDraft.clear()
+            return
+        }
+        EditorDraft(
+            text: text, baseText: vm.baseText, language: vm.currentLanguage,
+            languageIsManual: vm.languageIsManual, sourceEntryID: vm.sourceEntryID,
+            clipboardChangeCount: clipboardChangeCountOnHide
+        ).save()
     }
     
     @objc func clearHistory() {
@@ -186,6 +221,8 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         closeHistory()
         
         if let window = settingsWindow {
+            // Fresh view each time so edits abandoned with Cancel don't linger in @State.
+            window.contentView = NSHostingView(rootView: SettingsView())
             centerWindow(window, on: screenAtCursor())
             window.makeKeyAndOrderFront(nil)
             NSApp.activate(ignoringOtherApps: true)
@@ -198,7 +235,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         let contentView = SettingsView()
         
         let window = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 350, height: 540),
+            contentRect: NSRect(x: 0, y: 0, width: 350, height: 700),
             styleMask: [.titled, .closable],
             backing: .buffered,
             defer: false
@@ -287,6 +324,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     }
     
     @objc func showHistory() {
+        rememberFrontmostApp()
         closeSettings()
         
         // If we have a preserved history window (user was editing a history entry),
@@ -332,10 +370,16 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         window.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
         
-        // Focus the list so first entry is highlighted
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
-            if let tableView = self.findTableView(in: window.contentView) {
-                window.makeFirstResponder(tableView)
+        // Focus the list so first entry is highlighted. Force layout so the SwiftUI List's
+        // table exists now; fall back to the next run loop turn if it still doesn't.
+        window.contentView?.layoutSubtreeIfNeeded()
+        if let tableView = findTableView(in: window.contentView) {
+            window.makeFirstResponder(tableView)
+        } else {
+            DispatchQueue.main.async {
+                if let tableView = self.findTableView(in: window.contentView) {
+                    window.makeFirstResponder(tableView)
+                }
             }
         }
     }
@@ -360,12 +404,8 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     }
     
     func loadEntryToEditor(_ entry: HistoryEntry) {
-        editorViewModel.load(entry.text)
+        editorViewModel.load(entry.text, language: entry.language)
         editorViewModel.sourceEntryID = entry.id
-        editorViewModel.languageIsManual = entry.language != nil
-        if let lang = entry.language {
-            editorViewModel.currentLanguage = lang
-        }
         // Hide but don't destroy — closing the editor returns here
         let origin = historyWindow?.frame.origin
         historyWindow?.orderOut(nil)
@@ -385,6 +425,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         if editorWindow?.isKeyWindow == true {
             return
         }
+        rememberFrontmostApp()
         
         // If we were editing a history entry, restore the editor for that entry
         if historyWindow != nil && editorViewModel.sourceEntryID != nil {
@@ -403,8 +444,9 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         }
         
         // Snapshot whether the editor has hidden unsaved content worth restoring
-        let hiddenContent = (editorWindow?.isVisible == false && !editorViewModel.text.isEmpty)
-        ? editorViewModel.text : nil
+        let hiddenContent = editorWindow == nil
+            ? pendingDraft?.text
+            : (editorWindow?.isVisible == false && !editorViewModel.text.isEmpty) ? editorViewModel.text : nil
         
         // Try AX first — instant, no side effects
         if AXIsProcessTrusted(), let selected = selectedTextFromFrontmostApp(), !selected.isEmpty {
@@ -438,18 +480,31 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         dn?.post(tap: .cghidEventTap)
         up?.post(tap: .cghidEventTap)
         
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) { [weak self] in
-            guard let self = self else { return }
+        // Poll for the copy to land instead of always waiting the full timeout — most apps
+        // write the pasteboard within a few ms, so the editor appears almost immediately.
+        let deadline = Date().addingTimeInterval(0.15)
+        func finish() {
             let newText = pasteboard.string(forType: .string) ?? ""
             let gotNewText = pasteboard.changeCount != savedChangeCount && !newText.isEmpty && newText != previousText
             if let old = hiddenContent, !gotNewText {
                 // Nothing new from Cmd+C either — restore unsaved content
-                self.restoreHiddenEditor(old)
+                restoreHiddenEditor(old)
             } else {
-                self.editorViewModel.load(gotNewText ? newText : previousText)
-                self.presentEditorWindow()
+                editorViewModel.load(gotNewText ? newText : previousText)
+                presentEditorWindow()
             }
         }
+        func poll() {
+            // Some apps clear the pasteboard and write the text a moment later, so wait until
+            // there's actually a string, not just a changeCount bump.
+            let copied = pasteboard.changeCount != savedChangeCount && pasteboard.string(forType: .string) != nil
+            if copied || Date() >= deadline {
+                finish()
+            } else {
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.01) { poll() }
+            }
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.01) { poll() }
     }
     
     /// Reads the selected text from the currently frontmost app via the Accessibility API.
@@ -457,6 +512,9 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     private func selectedTextFromFrontmostApp() -> String? {
         guard let app = NSWorkspace.shared.frontmostApplication else { return nil }
         let axApp = AXUIElementCreateApplication(app.processIdentifier)
+        // AX calls block until the target app answers; a hung app (common with Electron)
+        // would otherwise stall the hotkey for the default ~6s timeout.
+        AXUIElementSetMessagingTimeout(axApp, 0.25)
         var focusedEl: CFTypeRef?
         guard AXUIElementCopyAttributeValue(axApp, kAXFocusedUIElementAttribute as CFString, &focusedEl) == .success,
               let el = focusedEl else { return nil }
@@ -481,15 +539,25 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         } else {
             createEditorWindow(at: origin)
         }
-        
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
-            if let window = self.editorWindow,
-               let textView = self.findTextView(in: window.contentView) {
-                NSRunningApplication.current.activate(options: [.activateAllWindows, .activateIgnoringOtherApps])
-                window.makeKey()
+        focusEditorTextView()
+        // Anything shown now supersedes a draft from the previous run.
+        if pendingDraft != nil {
+            pendingDraft = nil
+            EditorDraft.clear()
+        }
+    }
+    
+    /// Make the text view first responder right away so the first keystrokes aren't lost.
+    /// On first creation the SwiftUI hierarchy may not be built yet, so force a layout pass.
+    private func focusEditorTextView() {
+        guard let window = editorWindow else { return }
+        if editorViewModel.textView == nil { window.contentView?.layoutSubtreeIfNeeded() }
+        if let textView = editorViewModel.textView ?? findTextView(in: window.contentView) {
+            window.makeFirstResponder(textView)
+        } else {
+            DispatchQueue.main.async { [weak self] in
+                guard let self, let textView = self.editorViewModel.textView ?? self.findTextView(in: window.contentView) else { return }
                 window.makeFirstResponder(textView)
-                textView.setSelectedRange(NSRange(location: 0, length: 0))
-                textView.scrollRangeToVisible(NSRange(location: 0, length: 0))
             }
         }
     }
@@ -497,6 +565,8 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     func createEditorWindow(at origin: NSPoint? = nil) {
         let contentView = EditorView(viewModel: editorViewModel, onSave: { [weak self] in
             self?.saveToClipboard()
+        }, onSaveAndPaste: { [weak self] in
+            self?.saveAndPaste()
         }, onClose: { [weak self] in
             self?.closeEditor()
         })
@@ -525,7 +595,44 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         window.makeKeyAndOrderFront(nil)
     }
     
-    func saveToClipboard() {
+    /// Copies, closes, then switches back to the app the text came from and pastes it there.
+    func saveAndPaste() {
+        let target = previousApp
+        saveToClipboard(toast: nil)
+        guard let target, !target.isTerminated else {
+            showToast("Copied to clipboard")
+            return
+        }
+        guard AXIsProcessTrusted() else {
+            showToast("Copied — enable Accessibility to paste automatically")
+            return
+        }
+        target.activate()
+        // Wait for the target to actually become frontmost before sending ⌘V, or the
+        // keystroke can land in the wrong app.
+        let deadline = Date().addingTimeInterval(1.0)
+        func attempt() {
+            if NSWorkspace.shared.frontmostApplication == target {
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { [weak self] in
+                    let src = CGEventSource(stateID: .hidSystemState)
+                    let down = CGEvent(keyboardEventSource: src, virtualKey: 0x09, keyDown: true)
+                    down?.flags = .maskCommand
+                    let up = CGEvent(keyboardEventSource: src, virtualKey: 0x09, keyDown: false)
+                    up?.flags = .maskCommand
+                    down?.post(tap: .cghidEventTap)
+                    up?.post(tap: .cghidEventTap)
+                    self?.showToast("Pasted")
+                }
+            } else if Date() < deadline {
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.02) { attempt() }
+            } else {
+                showToast("Copied to clipboard")
+            }
+        }
+        attempt()
+    }
+    
+    func saveToClipboard(toast: String? = "Copied to clipboard") {
         let pasteboard = NSPasteboard.general
         pasteboard.clearContents()
         pasteboard.setString(editorViewModel.text, forType: .string)
@@ -544,7 +651,8 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         editorViewModel.markSaved()
         closeHistory()
         closeEditor()
-        showToast("Copied to clipboard")
+        EditorDraft.clear()
+        if let toast { showToast(toast) }
     }
     
     private func screenAtCursor() -> NSScreen {
@@ -649,12 +757,21 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
     
+    /// Re-show the hidden editor as-is. It still holds the unsaved text, so there's nothing to
+    /// reload — reloading used to reset the dirty baseline, cursor position and undo history.
     private func restoreHiddenEditor(_ text: String) {
-        guard let window = editorWindow else { return }
-        editorViewModel.load(text)
+        guard let window = editorWindow else {
+            // Fresh launch: restore the previous run's unsaved draft.
+            if let draft = pendingDraft {
+                editorViewModel.restore(draft)
+                presentEditorWindow()
+            }
+            return
+        }
         NSRunningApplication.current.activate(options: [.activateAllWindows, .activateIgnoringOtherApps])
         window.makeKeyAndOrderFront(nil)
         positionWindowNearCursor(window)
+        focusEditorTextView()
     }
     
     func closeEditor() {
