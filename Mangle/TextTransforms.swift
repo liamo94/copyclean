@@ -601,23 +601,28 @@ nonisolated enum TextTransforms {
     /// Subsequence fuzzy match score (higher is better), nil when `query` doesn't match.
     /// Rewards consecutive characters and matches at word starts.
     static func fuzzyScore(_ query: String, in candidate: String) -> Int? {
+        fuzzyMatch(query, in: candidate)?.score
+    }
+
+    /// Like `fuzzyScore`, plus the Character offsets in `candidate` that matched.
+    static func fuzzyMatch(_ query: String, in candidate: String) -> (score: Int, positions: [Int])? {
         let q = Array(query.lowercased().filter { $0 != " " })
-        guard !q.isEmpty else { return 0 }
+        guard !q.isEmpty else { return (0, []) }
         let c = Array(candidate.lowercased())
         var score = 0
-        var qi = 0
+        var positions: [Int] = []
         var lastMatch = -2
-        for (i, ch) in c.enumerated() where qi < q.count {
-            guard ch == q[qi] else { continue }
+        for (i, ch) in c.enumerated() where positions.count < q.count {
+            guard ch == q[positions.count] else { continue }
             var points = 1
             if i == lastMatch + 1 { points += 4 }
             if i == 0 || !(c[i - 1].isLetter || c[i - 1].isNumber) { points += 6 }
             score += points
             lastMatch = i
-            qi += 1
+            positions.append(i)
         }
-        guard qi == q.count else { return nil }
-        return score * 100 / max(c.count, 1) + score
+        guard positions.count == q.count else { return nil }
+        return (score * 100 / max(c.count, 1) + score, positions)
     }
 }
 

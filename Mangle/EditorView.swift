@@ -462,6 +462,7 @@ struct EditorView: View {
                         query: $paletteQuery,
                         results: paletteResults,
                         selectedIndex: paletteIndex,
+                        onSelect: { paletteIndex = $0 },
                         onRun: runPaletteCommand
                     )
                     .padding(.top, 36)
@@ -501,29 +502,59 @@ struct EditorView: View {
                     return nil // swallow all other keys while alert is open
                 }
 
-                // If focus went back to the document (e.g. a click), the palette is done —
-                // keys must reach the editor, not run palette commands.
-                if showPalette, let tv = textView, tv.window?.firstResponder === tv {
+                // If focus went somewhere else (the document after a click, or the find bar),
+                // the palette is done — keys must reach that field, not run palette commands.
+                if showPalette, textView?.window?.firstResponder === textView || isFindFieldFocused || isReplaceFieldFocused {
                     closePalette()
                     return event
                 }
                 // The palette keeps focus in its search field; drive its list from here.
                 if showPalette {
+                    let key = event.charactersIgnoringModifiers?.lowercased()
+                    // The shortcuts that open the palette close it again.
+                    if (mods == .command && key == "k") || (mods == [.command, .shift] && key == "p") {
+                        closePalette()
+                        return nil
+                    }
+                    if mods == .control, key == "g" { paletteQuery = ":"; return nil }
                     let results = paletteResults
+                    func move(by step: Int, wrapping: Bool) {
+                        guard !results.isEmpty else { return }
+                        let target = paletteIndex + step
+                        if wrapping {
+                            paletteIndex = (target % results.count + results.count) % results.count
+                        } else {
+                            paletteIndex = min(max(target, 0), results.count - 1)
+                        }
+                    }
+                    if mods == .control, key == "n" { move(by: 1, wrapping: true); return nil }
+                    if mods == .control, key == "p" { move(by: -1, wrapping: true); return nil }
                     switch event.keyCode {
                     case 53: // Escape
                         closePalette()
                         return nil
                     case 125: // Down
-                        paletteIndex = min(paletteIndex + 1, max(results.count - 1, 0))
+                        move(by: 1, wrapping: true)
                         return nil
                     case 126: // Up
-                        paletteIndex = max(paletteIndex - 1, 0)
+                        move(by: -1, wrapping: true)
+                        return nil
+                    case 121: // Page Down
+                        move(by: 8, wrapping: false)
+                        return nil
+                    case 116: // Page Up
+                        move(by: -8, wrapping: false)
                         return nil
                     case 36, 76: // Return / Enter
-                        if results.indices.contains(paletteIndex) { runPaletteCommand(results[paletteIndex]) }
+                        if results.indices.contains(paletteIndex) { runPaletteCommand(results[paletteIndex].command) }
                         return nil
                     default:
+                        // Editing keys reach the search field (including ⌘←/⌘→/⌘⌫) and app-level
+                        // keys (quit, hide…) still work; editor shortcuts (⌘F, ⌘S, ⌘T…) would
+                        // otherwise fire behind the palette and act on the document.
+                        let fieldEditingKeys: Set<UInt16> = [51, 117, 123, 124] // ⌫, ⌦, ←, →
+                        if mods.contains(.command), !fieldEditingKeys.contains(event.keyCode),
+                           let key, !"acvxzqhm,".contains(key) { return nil }
                         return event
                     }
                 }
@@ -763,18 +794,9 @@ struct EditorView: View {
                         UserDefaults.standard.set(findText, forKey: Self.lastFindTextKey)
                     }
                     .onSubmit { findNext() }
-                findToggle("Aa", isOn: caseSensitive, help: "Match Case") {
-                    caseSensitive.toggle()
-                    UserDefaults.standard.set(caseSensitive, forKey: Self.lastFindCaseKey)
-                }
-                findToggle("ab", isOn: wholeWord, help: "Whole Word", underline: true) {
-                    wholeWord.toggle()
-                    UserDefaults.standard.set(wholeWord, forKey: Self.lastFindWordKey)
-                }
-                findToggle(".*", isOn: useRegex, help: "Use Regular Expression") {
-                    useRegex.toggle()
-                    UserDefaults.standard.set(useRegex, forKey: Self.lastFindRegexKey)
-                }
+                findToggle("Aa", isOn: caseSensitive, help: "Match Case", action: toggleMatchCase)
+                findToggle("ab", isOn: wholeWord, help: "Whole Word", underline: true, action: toggleWholeWord)
+                findToggle(".*", isOn: useRegex, help: "Use Regular Expression", action: toggleRegex)
                 
                 if isInvalidRegex {
                     findBadge("Invalid", color: Color.red.opacity(0.7))
@@ -845,6 +867,36 @@ struct EditorView: View {
         Self.languages.first { $0.id == viewModel.currentLanguage }?.label ?? viewModel.currentLanguage
     }
     
+    /// The dot beside the language in the bottom bar — roughly each language's usual brand colour,
+    /// lightened where needed to read on a dark bar.
+    static func languageColor(_ id: String) -> Color {
+        let hex: Int
+        switch id {
+        case "json":                  hex = 0xE8B04A
+        case "javascript":            hex = 0xF1E05A
+        case "typescript":            hex = 0x3178C6
+        case "swift":                 hex = 0xF05138
+        case "python":                hex = 0x4B8BBE
+        case "rust":                  hex = 0xDEA584
+        case "go":                    hex = 0x00ADD8
+        case "xml":                   hex = 0xE34C26
+        case "css", "scss", "less":   hex = 0x8E6FD8
+        case "markdown":              hex = 0x6A9FD8
+        case "ruby":                  hex = 0xCC342D
+        case "java", "kotlin":        hex = 0xB07219
+        case "php":                   hex = 0x7A86B8
+        case "sql":                   hex = 0xE38C00
+        case "bash":                  hex = 0x89E051
+        case "c", "cpp":              hex = 0x659AD2
+        case "graphql":               hex = 0xE10098
+        case "diff":                  hex = 0x88C057
+        case "yaml":                  hex = 0xE0565B
+        case "perl":                  hex = 0x6E7FC0
+        default:                      return .secondary
+        }
+        return Color(red: Double(hex >> 16 & 0xFF) / 255, green: Double(hex >> 8 & 0xFF) / 255, blue: Double(hex & 0xFF) / 255)
+    }
+
     @ViewBuilder private var languagePickerItems: some View {
         ForEach(Self.languages, id: \.id) { lang in
             Button {
@@ -901,7 +953,7 @@ struct EditorView: View {
                 barDivider
             }
 
-            HStack(spacing: 4) {
+            HStack(spacing: 6) {
                 if showKeyboard {
                     DocumentFormatMenu(
                         status: viewModel.status,
@@ -911,7 +963,15 @@ struct EditorView: View {
                     )
                 }
 
-                Menu {
+                // Plain text that nobody chose isn't worth the space; any real language is.
+                if viewModel.currentLanguage != "plaintext" || viewModel.languageIsManual {
+                    BarMenu(title: currentLanguageLabel, dot: Self.languageColor(viewModel.currentLanguage)) {
+                        languagePickerItems
+                    }
+                    .help(viewModel.languageIsManual ? "Language" : "Language (detected)")
+                }
+
+                BarMenu(title: "Transform", systemImage: "wand.and.stars", tint: AppTheme.tealSUI) {
                     Menu("Language: \(currentLanguageLabel)") {
                         languagePickerItems
                     }
@@ -926,13 +986,7 @@ struct EditorView: View {
                             }
                         }
                     }
-                } label: {
-                    Text("Transform")
-                        .font(.system(size: 11))
                 }
-                .menuStyle(.borderlessButton)
-                .fixedSize()
-                .padding(.horizontal, 8)
                 .keyboardShortcut("t", modifiers: .command)
                 .help("Transform text (⌘T)")
             }
@@ -972,14 +1026,7 @@ struct EditorView: View {
             HStack(spacing: 4) {
                 // Cancel with unsaved-changes guard. A scratch pad just hides: its text
                 // comes back with the scratch shortcut, and goes to history when replaced.
-                Button {
-                    closeFindBar()
-                    if viewModel.isDirty && !viewModel.isScratch {
-                        showCancelAlert = true
-                    } else {
-                        onClose()
-                    }
-                } label: {
+                Button(action: cancelEditor) {
                     bottomAction(viewModel.isScratch ? "Hide" : "Cancel", shortcut: showBadges ? "Esc" : nil, hovered: hoverCancel)
                 }
                 .help(viewModel.isScratch ? "Hide the scratch pad — it comes back where you left it (Esc)" : "Cancel (Esc)")
@@ -1197,13 +1244,15 @@ struct EditorView: View {
     }
     
     private func replaceAll() {
-        guard let regex = buildSearchRegex() else { return }
-        let count = matchCount
+        guard let regex = buildSearchRegex(), let tv = textView else { return }
+        // Counted here, not from matchCount: from the palette, Find (and its count) may be closed.
+        let count = regex.numberOfMatches(in: tv.string, range: NSRange(location: 0, length: (tv.string as NSString).length))
         let template = replacementTemplate
         transform("Replace All", scope: .document) { text in
             regex.stringByReplacingMatches(in: text, range: NSRange(location: 0, length: (text as NSString).length), withTemplate: template)
         }
-        highlightMatches()
+        // From the palette, Find may be closed; highlighting then would leave marks nothing clears.
+        if showFindBar { highlightMatches() }
         if count > 0 { AppDelegate.shared?.showToast("Replaced \(count) match\(count == 1 ? "" : "es")") }
     }
     
@@ -1395,6 +1444,32 @@ struct EditorView: View {
         }
     }
     
+    private func toggleMatchCase() {
+        caseSensitive.toggle()
+        UserDefaults.standard.set(caseSensitive, forKey: Self.lastFindCaseKey)
+    }
+
+    private func toggleWholeWord() {
+        wholeWord.toggle()
+        UserDefaults.standard.set(wholeWord, forKey: Self.lastFindWordKey)
+    }
+
+    private func toggleRegex() {
+        useRegex.toggle()
+        UserDefaults.standard.set(useRegex, forKey: Self.lastFindRegexKey)
+    }
+
+    /// Cancel / Esc: asks before throwing away edits; a scratch pad just hides — its text
+    /// comes back with the scratch shortcut, and goes to history when replaced.
+    private func cancelEditor() {
+        closeFindBar()
+        if viewModel.isDirty && !viewModel.isScratch {
+            showCancelAlert = true
+        } else {
+            onClose()
+        }
+    }
+
     private func closeFindBar() {
         showFindBar = false
         // findText and the find options are intentionally kept — they're restored next time Find opens.
@@ -1410,8 +1485,10 @@ struct EditorView: View {
     
     // MARK: - Command Palette
     
-    private var paletteResults: [EditorCommand] {
-        CommandPaletteResults.filter(allCommands, query: paletteQuery, goToLine: goToLine)
+    private var paletteResults: [CommandPaletteResult] {
+        CommandPaletteResults.filter(allCommands, query: paletteQuery,
+                                     document: (textView?.string ?? viewModel.text) as NSString,
+                                     goToLine: goToLine)
     }
     
     private func openPalette(query: String = "") {
@@ -1429,6 +1506,10 @@ struct EditorView: View {
     
     private func runPaletteCommand(_ command: EditorCommand) {
         guard command.isEnabled else { return }
+        // Only real commands are remembered, not one-off rows like "Go to Line 42".
+        if allCommands.contains(where: { $0.id == command.id }) {
+            CommandPaletteResults.recordRecent(command.id)
+        }
         closePalette()
         // Run after focus is back in the text view, so commands act on the editor.
         DispatchQueue.main.async { command.run() }
@@ -1447,18 +1528,34 @@ struct EditorView: View {
     /// Every command available in the palette: editor actions plus all transforms.
     private var allCommands: [EditorCommand] {
         let mtv = textView as? MangleTextView
+        let undoManager = textView?.undoManager
+        let status = viewModel.status
         var commands: [EditorCommand] = [
             EditorCommand(title: "Save to Clipboard", section: "File", shortcut: "⌘S", run: onSave),
             EditorCommand(title: "Save and Paste", section: "File", shortcut: "⌘↩", run: onSaveAndPaste),
-            EditorCommand(title: "Revert to Original", section: "File", isEnabled: viewModel.isDirty && !viewModel.isScratch, run: revertToOriginal),
+            EditorCommand(title: "Revert to Original", section: "File", isEnabled: viewModel.isDirty && !viewModel.isScratch,
+                          detail: viewModel.isScratch ? "Not available for scratch pads" : (viewModel.isDirty ? nil : "No changes yet"),
+                          run: revertToOriginal),
             EditorCommand(title: "New Scratch", section: "File", shortcut: "⌘N", run: onNewScratch),
-            EditorCommand(title: "Discard Scratch", section: "File", isEnabled: viewModel.isScratch) {
+            EditorCommand(title: "Discard Scratch", section: "File", isEnabled: viewModel.isScratch,
+                          detail: viewModel.isScratch ? nil : "Only for scratch pads") {
                 closeFindBar()
                 onClose()
                 viewModel.discard()
             },
+            EditorCommand(title: viewModel.isScratch ? "Hide Scratch Pad" : "Close Editor", section: "File", shortcut: "Esc",
+                          key: "File/Close", run: cancelEditor),
+            EditorCommand(title: undoManager?.undoMenuItemTitle ?? "Undo", section: "Edit", shortcut: "⌘Z",
+                          isEnabled: undoManager?.canUndo == true, detail: undoManager?.canUndo == true ? nil : "Nothing to undo",
+                          key: "Edit/Undo") { undoManager?.undo() },
+            EditorCommand(title: undoManager?.redoMenuItemTitle ?? "Redo", section: "Edit", shortcut: "⇧⌘Z",
+                          isEnabled: undoManager?.canRedo == true, detail: undoManager?.canRedo == true ? nil : "Nothing to redo",
+                          key: "Edit/Redo") { undoManager?.redo() },
+            EditorCommand(title: "Select All", section: "Selection", shortcut: "⌘A") { textView?.selectAll(nil) },
             EditorCommand(title: viewModel.isPresenting ? "Stop Presenting" : "Start Presenting", section: "View", shortcut: "⌥⌘P",
-                          run: onTogglePresentation),
+                          key: "View/Presenting", run: onTogglePresentation),
+            EditorCommand(title: "Show Keyboard Shortcuts", section: "Help", isEnabled: !viewModel.isPresenting,
+                          detail: viewModel.isPresenting ? "Not while presenting" : nil) { showShortcuts = true },
             EditorCommand(title: "Fold", section: "Folding", shortcut: "⌥⌘←") { mtv?.foldAtCaret() },
             EditorCommand(title: "Unfold", section: "Folding", shortcut: "⌥⌘→") { mtv?.unfoldAtCaret() },
             EditorCommand(title: "Fold All", section: "Folding", shortcut: "⌥⇧⌘←") { mtv?.foldAll() },
@@ -1468,11 +1565,33 @@ struct EditorView: View {
             EditorCommand(title: "Collapse to Depth 3", section: "Folding") { mtv?.collapse(toDepth: 3) },
             EditorCommand(title: "Collapse to Depth 4", section: "Folding") { mtv?.collapse(toDepth: 4) },
             EditorCommand(title: "Copy JSON Path", section: "JSON", shortcut: "⌥⇧⌘C",
-                          isEnabled: viewModel.currentLanguage == "json", run: copyJSONPath),
+                          isEnabled: viewModel.currentLanguage == "json",
+                          detail: viewModel.currentLanguage == "json" ? nil : "JSON documents only", run: copyJSONPath),
             EditorCommand(title: "Find", section: "Find", shortcut: "⌘F") {
                 showFindBar = true
                 isFindFieldFocused = true
                 highlightMatches()
+            },
+            EditorCommand(title: "Replace", section: "Find") {
+                showFindBar = true
+                isReplaceFieldFocused = true
+                highlightMatches()
+            },
+            EditorCommand(title: "Replace All", section: "Find", isEnabled: !findText.isEmpty,
+                          detail: findText.isEmpty ? "Search for something first" : "“\(findText.prefix(30))” → “\(replaceText.prefix(30))”",
+                          run: replaceAll),
+            // Highlights only belong on screen while Find is open — with it closed nothing clears them.
+            EditorCommand(title: "Match Case", section: "Find", isCurrent: caseSensitive) {
+                toggleMatchCase()
+                if showFindBar { highlightMatches() }
+            },
+            EditorCommand(title: "Whole Word", section: "Find", isCurrent: wholeWord) {
+                toggleWholeWord()
+                if showFindBar { highlightMatches() }
+            },
+            EditorCommand(title: "Use Regular Expression", section: "Find", isCurrent: useRegex) {
+                toggleRegex()
+                if showFindBar { highlightMatches() }
             },
             EditorCommand(title: "Find Next", section: "Find", shortcut: "⌘G", run: findNext),
             EditorCommand(title: "Find Previous", section: "Find", shortcut: "⇧⌘G", run: findPrevious),
@@ -1488,18 +1607,42 @@ struct EditorView: View {
             EditorCommand(title: "Delete Line", section: "Edit", shortcut: "⇧⌘K") { if let tv = textView { deleteLine(in: tv) } },
             EditorCommand(title: "Move Line Up", section: "Edit", shortcut: "⌥↑") { if let tv = textView { moveLine(in: tv, up: true) } },
             EditorCommand(title: "Move Line Down", section: "Edit", shortcut: "⌥↓") { if let tv = textView { moveLine(in: tv, up: false) } },
-            EditorCommand(title: settings.wordWrap ? "Turn Off Word Wrap" : "Turn On Word Wrap", section: "View", shortcut: "⌥Z") { settings.wordWrap.toggle() },
+            EditorCommand(title: settings.wordWrap ? "Turn Off Word Wrap" : "Turn On Word Wrap", section: "View", shortcut: "⌥Z",
+                          key: "View/Word Wrap") { settings.wordWrap.toggle() },
             EditorCommand(title: "Zoom In", section: "View", shortcut: "⌘=") { zoom(by: 1) },
             EditorCommand(title: "Zoom Out", section: "View", shortcut: "⌘−") { zoom(by: -1) },
             EditorCommand(title: "Reset Zoom", section: "View", shortcut: "⌘0", run: resetZoom),
-            EditorCommand(title: "Indent Using Spaces (2)", section: "Indentation") { setIndentation(.spaces(2)) },
-            EditorCommand(title: "Indent Using Spaces (4)", section: "Indentation") { setIndentation(.spaces(4)) },
-            EditorCommand(title: "Indent Using Tabs", section: "Indentation") { setIndentation(.tabs) },
         ]
-        commands += Self.languages.map { lang in
-            EditorCommand(title: "Set Language: \(lang.label)", section: "Language") { setLanguage(lang.id) }
+        // "Indent Using" only changes what Tab inserts; "Convert" also re-indents the text.
+        let indentations: [(label: String, value: Indentation)] = [("Spaces (2)", .spaces(2)), ("Spaces (4)", .spaces(4)), ("Tabs", .tabs)]
+        commands += indentations.map { option in
+            EditorCommand(title: "Indent Using \(option.label)", section: "Indentation",
+                          isCurrent: status.indentation == option.value) { setIndentation(option.value) }
         }
-        commands += transformSections.flatMap(\.commands)
+        commands += indentations.map { option in
+            EditorCommand(title: "Convert Indentation to \(option.label)", section: "Indentation") { convertIndentation(to: option.value) }
+        }
+        commands += Self.languages.map { lang in
+            let isAuto = lang.id == "auto"
+            return EditorCommand(title: "Set Language: \(lang.label)", section: "Language",
+                                 isCurrent: isAuto ? !viewModel.languageIsManual : viewModel.currentLanguage == lang.id,
+                                 detail: isAuto && !viewModel.languageIsManual ? "Detected \(currentLanguageLabel)" : nil) {
+                setLanguage(lang.id)
+            }
+        }
+        // Format Code only exists in the Transform menu for languages Prettier handles; the
+        // palette still lists it (disabled) so searching for it explains why it's missing.
+        if !PrettierFormatter.shared.canFormat(language: viewModel.currentLanguage) {
+            commands.append(EditorCommand(title: "Format Code", section: "Format", shortcut: "⇧⌘F", isEnabled: false,
+                                          detail: "Not available for \(currentLanguageLabel)", run: {}))
+        }
+        commands += transformSections.flatMap(\.commands).map { cmd in
+            var cmd = cmd
+            if cmd.section == "Line Endings" {
+                cmd.isCurrent = cmd.title == "Convert to \(status.lineEnding.rawValue)"
+            }
+            return cmd
+        }
         return commands
     }
     
@@ -1628,7 +1771,7 @@ struct EditorView: View {
         }
     }
     
-    private func goToLine(_ line: Int) {
+    private func goToLine(_ line: Int, column: Int? = nil) {
         guard let tv = textView else { return }
         let ns = tv.string as NSString
         var location = 0
@@ -1637,7 +1780,14 @@ struct EditorView: View {
             location = NSMaxRange(ns.lineRange(for: NSRange(location: location, length: 0)))
             current += 1
         }
-        let range = NSRange(location: min(location, ns.length), length: 0)
+        location = min(location, ns.length)
+        if let column {
+            // Columns past the end of the line land at its end.
+            var contentsEnd = 0
+            ns.getLineStart(nil, end: nil, contentsEnd: &contentsEnd, for: NSRange(location: location, length: 0))
+            location = min(location + column - 1, contentsEnd)
+        }
+        let range = NSRange(location: location, length: 0)
         tv.window?.makeFirstResponder(tv)
         tv.setSelectedRange(range)
         tv.scrollRangeToVisible(range)
@@ -3345,7 +3495,7 @@ private struct DocumentFormatMenu: View {
     private let options: [Indentation] = [.spaces(2), .spaces(4), .tabs]
     
     var body: some View {
-        Menu {
+        BarMenu(title: "\(status.indentation.label) · \(status.lineEnding.rawValue)", systemImage: "increase.indent") {
             Picker("Indent Using", selection: Binding(get: { status.indentation }, set: onIndentation)) {
                 ForEach(options, id: \.self) { Text($0.label).tag($0) }
             }
@@ -3361,13 +3511,50 @@ private struct DocumentFormatMenu: View {
                 Button("Convert to CRLF") { onLineEnding(.crlf) }
                 Button("Convert to CR") { onLineEnding(.cr) }
             }
-        } label: {
-            Text("\(status.indentation.label) · \(status.lineEnding.rawValue)")
-                .font(.system(size: 11))
         }
-        .menuStyle(.borderlessButton)
-        .fixedSize()
         .help("Indentation and line endings")
+    }
+}
+
+/// A bottom-bar menu drawn as a chip: icon (or colour dot), title and a small chevron on a
+/// faint fill that brightens on hover.
+private struct BarMenu<Content: View>: View {
+    let title: String
+    var systemImage: String? = nil
+    var tint: Color? = nil
+    var dot: Color? = nil
+    @ViewBuilder let content: () -> Content
+    @State private var hovered = false
+
+    var body: some View {
+        Menu(content: content) {
+            HStack(spacing: 5) {
+                if let dot {
+                    Circle()
+                        .fill(dot)
+                        .frame(width: 7, height: 7)
+                } else if let systemImage {
+                    Image(systemName: systemImage)
+                        .font(.system(size: 10, weight: .medium))
+                        .foregroundColor(tint ?? .secondary)
+                }
+                Text(title)
+                    .font(.system(size: 11, weight: .medium))
+                    .foregroundColor(hovered ? .primary : .primary.opacity(0.75))
+                Image(systemName: "chevron.down")
+                    .font(.system(size: 7, weight: .bold))
+                    .foregroundColor(.secondary.opacity(hovered ? 0.9 : 0.5))
+            }
+            .padding(.horizontal, 7)
+            .padding(.vertical, 3)
+            .background(Color.secondary.opacity(hovered ? 0.16 : 0.07), in: RoundedRectangle(cornerRadius: 5))
+            .contentShape(Rectangle())
+        }
+        .menuStyle(.button)
+        .buttonStyle(.plain)
+        .menuIndicator(.hidden)
+        .fixedSize()
+        .onHover { hovered = $0 }
     }
 }
 
@@ -3412,7 +3599,7 @@ private struct TextStatsLabel: View {
 private struct ShortcutsPopover: View {
     private let sections: [(title: String, shortcuts: [(keys: String, action: String)])] = [
         ("General", [
-            ("⌘ K",        "Command palette"),
+            ("⌘ K  ⌘ ⇧ P", "Command palette"),
             ("⌘ S",        "Save to clipboard"),
             ("⌘ ↩",        "Save and paste into previous app"),
             ("⌘ N",        "New scratch pad"),
@@ -3480,7 +3667,9 @@ private struct ShortcutsPopover: View {
                             .foregroundColor(AppTheme.tealSUI)
                             .textCase(.uppercase)
                         
-                        ForEach(section.shortcuts, id: \.action) { shortcut in
+                        // The list is static, so position is a stable identity (actions and keys can repeat).
+                        ForEach(section.shortcuts.indices, id: \.self) { index in
+                            let shortcut = section.shortcuts[index]
                             HStack(spacing: 0) {
                                 Text(shortcut.action)
                                     .font(.callout)
