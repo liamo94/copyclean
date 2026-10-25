@@ -313,6 +313,9 @@ struct EditorView: View {
     @State private var hoverKeyboard = false
     @State private var hoverSave = false
     @State private var hoverWordWrap = false
+    @State private var hoverTransform = false
+    /// Where the Transform chip sits (SwiftUI global, top-left origin), to pop its menu above it.
+    @State private var transformChipFrame: CGRect?
     
     // Find options (restored from the last search)
     @State private var useRegex = UserDefaults.standard.bool(forKey: EditorView.lastFindRegexKey)
@@ -443,6 +446,13 @@ struct EditorView: View {
                 .keyboardShortcut("f", modifiers: .command)
                 Button("") { onSaveAndPaste() }
                     .keyboardShortcut(.return, modifiers: .command)
+                // The Transform menu is an AppKit pop-up shown on demand, so its items'
+                // shortcuts (⇧⌘F, ⇧⌘T, ⇧⌘L…) are bound here instead.
+                ForEach(transformSections.flatMap(\.commands).filter { $0.keyboardShortcut != nil }) { cmd in
+                    Button("", action: cmd.run)
+                        .keyboardShortcut(cmd.keyboardShortcut)
+                        .disabled(!cmd.isEnabled)
+                }
                 // The bottom bar (and its ⌘S button) is hidden while presenting.
                 if viewModel.isPresenting {
                     Button("") { onSave() }
@@ -592,6 +602,7 @@ struct EditorView: View {
                 if mods == [.command, .shift], key == "p" { openPalette(); return nil }
                 if mods == .control, key == "g" { openPalette(query: ":"); return nil }
                 if mods == .command, key == "n" { onNewScratch(); return nil }
+                if mods == .command, key == "t" { showTransformMenu(); return nil }
                 if mods == [.command, .option], key == "p" { onTogglePresentation(); return nil }
                 
                 if !editingFieldFocused {
@@ -971,23 +982,19 @@ struct EditorView: View {
                     .help(viewModel.languageIsManual ? "Language" : "Language (detected)")
                 }
 
-                BarMenu(title: "Transform", systemImage: "wand.and.stars", tint: AppTheme.tealSUI) {
-                    Menu("Language: \(currentLanguageLabel)") {
-                        languagePickerItems
-                    }
-
-                    ForEach(transformSections, id: \.title) { section in
-                        Divider()
-                        Section(section.title) {
-                            ForEach(section.commands) { cmd in
-                                Button(cmd.title, action: cmd.run)
-                                    .keyboardShortcut(cmd.keyboardShortcut)
-                                    .disabled(!cmd.isEnabled)
-                            }
-                        }
-                    }
+                // An AppKit menu rather than a SwiftUI Menu: SwiftUI can't open a Menu from code,
+                // and ⌘T has to.
+                Button(action: showTransformMenu) {
+                    BarChipLabel(title: "Transform", systemImage: "wand.and.stars", tint: AppTheme.tealSUI, hovered: hoverTransform)
                 }
-                .keyboardShortcut("t", modifiers: .command)
+                .buttonStyle(.plain)
+                .fixedSize()
+                .onHover { hoverTransform = $0 }
+                .background(GeometryReader { geo in
+                    Color.clear
+                        .onAppear { transformChipFrame = geo.frame(in: .global) }
+                        .onChange(of: geo.frame(in: .global)) { _, frame in transformChipFrame = frame }
+                })
                 .help("Transform text (⌘T)")
             }
             .padding(.horizontal, 6)
@@ -1483,6 +1490,51 @@ struct EditorView: View {
         }
     }
     
+    // MARK: - Transform Menu
+
+    /// Pops the Transform menu up above its chip (⌘T or a click).
+    private func showTransformMenu() {
+        guard !viewModel.isPresenting, let window = textView?.window, let contentView = window.contentView,
+              let chip = transformChipFrame else { return }
+        let menu = NSMenu()
+        menu.autoenablesItems = false
+
+        let languageItem = NSMenuItem(title: "Language: \(currentLanguageLabel)", action: nil, keyEquivalent: "")
+        let languages = NSMenu()
+        for lang in Self.languages {
+            let item = ClosureMenuItem(title: lang.label) { setLanguage(lang.id) }
+            item.state = viewModel.currentLanguage == lang.id ? .on : .off
+            languages.addItem(item)
+        }
+        languageItem.submenu = languages
+        menu.addItem(languageItem)
+
+        for section in transformSections {
+            menu.addItem(.separator())
+            menu.addItem(.sectionHeader(title: section.title))
+            for cmd in section.commands {
+                let item = ClosureMenuItem(title: cmd.title, action: cmd.run)
+                item.isEnabled = cmd.isEnabled
+                if let shortcut = cmd.keyboardShortcut, let character = shortcut.key.character.lowercased().first {
+                    // Display only — the shortcuts themselves are bound by hidden buttons.
+                    item.keyEquivalent = String(character)
+                    var mask: NSEvent.ModifierFlags = []
+                    if shortcut.modifiers.contains(.command) { mask.insert(.command) }
+                    if shortcut.modifiers.contains(.shift) { mask.insert(.shift) }
+                    if shortcut.modifiers.contains(.option) { mask.insert(.option) }
+                    if shortcut.modifiers.contains(.control) { mask.insert(.control) }
+                    item.keyEquivalentModifierMask = mask
+                }
+                menu.addItem(item)
+            }
+        }
+
+        // The chip's frame is top-left based; open the menu upwards from just above it.
+        let chipTop = contentView.isFlipped ? chip.minY : contentView.bounds.height - chip.minY
+        let point = NSPoint(x: chip.minX, y: contentView.isFlipped ? chipTop - menu.size.height - 4 : chipTop + menu.size.height + 4)
+        menu.popUp(positioning: nil, at: point, in: contentView)
+    }
+
     // MARK: - Command Palette
     
     private var paletteResults: [CommandPaletteResult] {
@@ -3528,27 +3580,7 @@ private struct BarMenu<Content: View>: View {
 
     var body: some View {
         Menu(content: content) {
-            HStack(spacing: 5) {
-                if let dot {
-                    Circle()
-                        .fill(dot)
-                        .frame(width: 7, height: 7)
-                } else if let systemImage {
-                    Image(systemName: systemImage)
-                        .font(.system(size: 10, weight: .medium))
-                        .foregroundColor(tint ?? .secondary)
-                }
-                Text(title)
-                    .font(.system(size: 11, weight: .medium))
-                    .foregroundColor(hovered ? .primary : .primary.opacity(0.75))
-                Image(systemName: "chevron.down")
-                    .font(.system(size: 7, weight: .bold))
-                    .foregroundColor(.secondary.opacity(hovered ? 0.9 : 0.5))
-            }
-            .padding(.horizontal, 7)
-            .padding(.vertical, 3)
-            .background(Color.secondary.opacity(hovered ? 0.16 : 0.07), in: RoundedRectangle(cornerRadius: 5))
-            .contentShape(Rectangle())
+            BarChipLabel(title: title, systemImage: systemImage, tint: tint, dot: dot, hovered: hovered)
         }
         .menuStyle(.button)
         .buttonStyle(.plain)
@@ -3556,6 +3588,53 @@ private struct BarMenu<Content: View>: View {
         .fixedSize()
         .onHover { hovered = $0 }
     }
+}
+
+private struct BarChipLabel: View {
+    let title: String
+    var systemImage: String? = nil
+    var tint: Color? = nil
+    var dot: Color? = nil
+    let hovered: Bool
+
+    var body: some View {
+        HStack(spacing: 5) {
+            if let dot {
+                Circle()
+                    .fill(dot)
+                    .frame(width: 7, height: 7)
+            } else if let systemImage {
+                Image(systemName: systemImage)
+                    .font(.system(size: 10, weight: .medium))
+                    .foregroundColor(tint ?? .secondary)
+            }
+            Text(title)
+                .font(.system(size: 11, weight: .medium))
+                .foregroundColor(hovered ? .primary : .primary.opacity(0.75))
+            Image(systemName: "chevron.down")
+                .font(.system(size: 7, weight: .bold))
+                .foregroundColor(.secondary.opacity(hovered ? 0.9 : 0.5))
+        }
+        .padding(.horizontal, 7)
+        .padding(.vertical, 3)
+        .background(Color.secondary.opacity(hovered ? 0.16 : 0.07), in: RoundedRectangle(cornerRadius: 5))
+        .contentShape(Rectangle())
+    }
+}
+
+/// A menu item that runs a closure (NSMenuItem needs a target/action otherwise).
+private final class ClosureMenuItem: NSMenuItem {
+    private let handler: () -> Void
+
+    init(title: String, action handler: @escaping () -> Void) {
+        self.handler = handler
+        super.init(title: title, action: #selector(run), keyEquivalent: "")
+        target = self
+    }
+
+    required init(coder: NSCoder) { fatalError("init(coder:) is not supported") }
+
+    @objc private func run() { handler() }
 }
 
 private struct CursorPositionLabel: View {
