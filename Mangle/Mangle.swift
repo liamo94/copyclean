@@ -392,8 +392,14 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMenuDele
     }
     
     private static let doubleCopyInterval: TimeInterval = 0.4
+    /// Marks the ⌘C the editor hotkey posts, so the double-copy monitor doesn't count it.
+    private static let syntheticEventTag: Int64 = 0x4D616E67
     
     private func handleGlobalKeyDown(_ event: NSEvent) {
+        if event.cgEvent?.getIntegerValueField(.eventSourceUserData) == Self.syntheticEventTag {
+            lastCopyPress = .distantPast
+            return
+        }
         let mods = event.modifierFlags.intersection([.command, .shift, .option, .control])
         // Match the character, not the key code, so ⌘C works on non-QWERTY layouts.
         guard mods == .command, !event.isARepeat,
@@ -473,8 +479,10 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMenuDele
         
         if let window = settingsWindow {
             // Fresh view each time so edits abandoned with Cancel don't linger in @State.
-            window.contentView = NSHostingView(rootView: SettingsView())
-            centerWindow(window, on: screenAtCursor())
+            let screen = screenAtCursor()
+            window.setContentSize(settingsContentSize(on: screen))
+            window.contentView = NSHostingView(rootView: ScrollView { SettingsView() })
+            centerWindow(window, on: screen)
             window.makeKeyAndOrderFront(nil)
             NSApp.activate(ignoringOtherApps: true)
         } else {
@@ -482,14 +490,16 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMenuDele
         }
     }
     
-    func createSettingsWindow() {
-        // Fit the content, but scroll rather than run off a short screen.
-        let screen = screenAtCursor()
+    /// Fits the Settings content, but leaves it to scroll rather than run off a short screen.
+    private func settingsContentSize(on screen: NSScreen) -> NSSize {
         let fitting = NSHostingView(rootView: SettingsView()).fittingSize
-        let height = min(fitting.height, screen.visibleFrame.height - 40)
-        
+        return NSSize(width: fitting.width, height: min(fitting.height, screen.visibleFrame.height - 40))
+    }
+    
+    func createSettingsWindow() {
+        let screen = screenAtCursor()
         let window = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: fitting.width, height: height),
+            contentRect: NSRect(origin: .zero, size: settingsContentSize(on: screen)),
             styleMask: [.titled, .closable],
             backing: .buffered,
             defer: false
@@ -722,9 +732,10 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMenuDele
     func showEditor(fromMenu: Bool = false) {
         let vm = editorViewModel
         let pasteboard = NSPasteboard.general
-        if editorWindow?.isKeyWindow == true {
+        if let window = editorWindow, window.isKeyWindow {
             if !vm.isScratch {
-                dismissEditor()
+                // The menu item only ever opens; the hotkey toggles.
+                if fromMenu { presentEditorWindow(replacing: window.frame) } else { dismissEditor() }
             } else if vm.buffer(scratch: false).text.isEmpty {
                 openEdit(pasteboard.string(forType: .string) ?? "", origin: .clipboard, replacing: visibleWindowFrame())
             } else {
@@ -787,8 +798,10 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMenuDele
         let src = CGEventSource(stateID: .hidSystemState)
         let dn = CGEvent(keyboardEventSource: src, virtualKey: 0x08, keyDown: true)
         dn?.flags = .maskCommand
+        dn?.setIntegerValueField(.eventSourceUserData, value: Self.syntheticEventTag)
         let up = CGEvent(keyboardEventSource: src, virtualKey: 0x08, keyDown: false)
         up?.flags = .maskCommand
+        up?.setIntegerValueField(.eventSourceUserData, value: Self.syntheticEventTag)
         dn?.post(tap: .cghidEventTap)
         up?.post(tap: .cghidEventTap)
         

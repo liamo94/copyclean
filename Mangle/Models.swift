@@ -245,9 +245,12 @@ nonisolated enum TextStats {
         var lines = 1
         var words = 0
         var inWord = false
+        var afterCR = false
         for unit in text.utf16 {
             let isSpace = unit == 32 || unit == 9 || unit == 10 || unit == 13 || unit == 0xA0 || unit == 0x2028 || unit == 0x2029
-            if unit == 10 { lines += 1 }
+            // LF, CR and CRLF each end one line.
+            if unit == 13 || (unit == 10 && !afterCR) { lines += 1 }
+            afterCR = unit == 13
             if isSpace {
                 inWord = false
             } else if !inWord {

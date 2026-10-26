@@ -252,20 +252,26 @@ class LineNumberRulerView: NSRulerView {
     }
 }
 
-extension NSString {
-    /// Counts "\n" in `range` using a fixed-size buffer (no per-call allocation proportional
+nonisolated extension NSString {
+    /// Counts line breaks in `range` using a fixed-size buffer (no per-call allocation proportional
     /// to the document, no substring/array churn).
     func countNewlines(in range: NSRange) -> Int {
         let chunk = 4096
         var count = 0
         var loc = range.location
         let end = NSMaxRange(range)
+        // LF, CR and CRLF each end a line, as they do for NSTextView and lineRange(for:).
+        var afterCR = false
         withUnsafeTemporaryAllocation(of: unichar.self, capacity: chunk) { buf in
             guard let base = buf.baseAddress else { return }
             while loc < end {
                 let n = min(chunk, end - loc)
                 getCharacters(base, range: NSRange(location: loc, length: n))
-                for i in 0..<n where base[i] == 10 { count += 1 }
+                for i in 0..<n {
+                    let c = base[i]
+                    if c == 13 || (c == 10 && !afterCR) { count += 1 }
+                    afterCR = c == 13
+                }
                 loc += n
             }
         }
@@ -494,7 +500,7 @@ struct EditorView: View {
                 // only hidden (never closed), so without this check its shortcuts fired in
                 // History/Settings and edited the hidden document.
                 guard let editorWindow = textView?.window, event.window === editorWindow else { return event }
-                let mods = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
+                let mods = event.modifierFlags.intersection([.command, .shift, .option, .control])
                 
                 // If focus went somewhere else (the document after a click, or the find bar),
                 // the palette is done — keys must reach that field, not run palette commands.
@@ -1125,7 +1131,7 @@ struct EditorView: View {
         let start = NSMaxRange(tv.selectedRange())
         func firstMatch(from: Int, to: Int) -> NSRange? {
             var result: NSRange?
-            regex.enumerateMatches(in: string, options: [.withoutAnchoringBounds], range: NSRange(location: from, length: to - from)) { m, _, stop in
+            regex.enumerateMatches(in: string, options: [.withoutAnchoringBounds, .withTransparentBounds], range: NSRange(location: from, length: to - from)) { m, _, stop in
                 if let r = m?.range, r.length > 0 { result = r; stop.pointee = true }
             }
             return result
@@ -1162,7 +1168,7 @@ struct EditorView: View {
         // insertText applies auto-close, so a one-character replacement like "(" or a quote
         // used to wrap the match ("(foo)") instead of replacing it.
         if selectedRange.length > 0,
-           let match = regex.firstMatch(in: string, options: [.withoutAnchoringBounds], range: selectedRange),
+           let match = regex.firstMatch(in: string, options: [.withoutAnchoringBounds, .withTransparentBounds], range: selectedRange),
            match.range == selectedRange {
             let replacement = regex.replacementString(for: match, in: string, offset: 0, template: replacementTemplate)
             if tv.shouldChangeText(in: selectedRange, replacementString: replacement) {
@@ -1318,12 +1324,16 @@ struct EditorView: View {
         let text = tv.string as NSString
         let (ls, le, ce, col) = lineExtents(in: tv)
         let lineText = text.substring(with: NSRange(location: ls, length: ce - ls))
-        let insertion = lineText + "\n"
+        // Reuse the line's own ending (CRLF stays CRLF). The last line may have none, so the
+        // break goes before the copy instead of after it.
+        let ending = text.substring(with: NSRange(location: ce, length: le - ce))
+        let insertion = ending.isEmpty ? "\n" + lineText : lineText + ending
         let insertRange = NSRange(location: le, length: 0)
         if tv.shouldChangeText(in: insertRange, replacementString: insertion) {
             tv.replaceCharacters(in: insertRange, with: insertion)
             tv.didChangeText()
-            let newPos = min(le + col, (tv.string as NSString).length)
+            let copyStart = ending.isEmpty ? le + 1 : le
+            let newPos = min(copyStart + col, (tv.string as NSString).length)
             tv.setSelectedRange(NSRange(location: newPos, length: 0))
         }
     }
@@ -2609,6 +2619,72 @@ final class MangleTextView: NSTextView {
 
 // MARK: - Custom Text Editor
 
+/// Highlightr's storage, plus running counts of the language's block delimiters (`/*`, `*/`,
+/// `<!--`, `"""`…). Each edit recounts only the text around it, so the highlighter can tell
+/// whether a comment or string opened or closed without rescanning the document per keystroke.
+nonisolated final class MangleCodeStorage: CodeAttributedString {
+    /// Documents this long skip block tracking (and so block-aware re-highlighting).
+    static let maxTrackedLength = 300_000
+
+    private static let blockCommentLanguages: Set<String> = [
+        "c", "cpp", "java", "javascript", "typescript", "css", "scss", "less",
+        "swift", "kotlin", "go", "rust", "php", "graphql"
+    ]
+    static func blockDelimiters(for language: String?) -> [(open: String, close: String)] {
+        guard let language else { return [] }
+        var result: [(String, String)] = []
+        if blockCommentLanguages.contains(language) { result.append(("/*", "*/")) }
+        if language == "xml" || language == "markdown" { result.append(("<!--", "-->")) }
+        if language == "python" { result.append(("\"\"\"", "\"\"\"")); result.append(("'''", "'''")) }
+        return result
+    }
+
+    /// Occurrences of each delimiter in the document, keyed by the delimiter itself.
+    private(set) var delimiterCounts: [String: Int] = [:]
+    private var needles: [String] = []
+
+    override var language: String? {
+        // willSet: the superclass highlights from its didSet, which must see the new counts.
+        willSet { recount(for: newValue) }
+    }
+
+    private func recount(for language: String?) {
+        let pairs = Self.blockDelimiters(for: language)
+        needles = Array(Set(pairs.flatMap { [$0.open, $0.close] }))
+        delimiterCounts = [:]
+        let text = string as NSString
+        guard text.length < Self.maxTrackedLength else { needles = []; return }
+        let all = NSRange(location: 0, length: text.length)
+        for n in needles { delimiterCounts[n] = text.occurrences(of: n, in: all) }
+    }
+
+    /// False for languages without block delimiters and for documents too long to track.
+    var isTrackingDelimiters: Bool { !needles.isEmpty }
+
+    override func replaceCharacters(in range: NSRange, with str: String) {
+        guard !needles.isEmpty else {
+            super.replaceCharacters(in: range, with: str)
+            // Resume tracking once a long document is cut back below the limit.
+            if length < Self.maxTrackedLength, !Self.blockDelimiters(for: language).isEmpty { recount(for: language) }
+            return
+        }
+        // Any delimiter the edit creates or breaks overlaps the edited range, so counting a
+        // margin of (longest delimiter - 1) either side before and after gives the change.
+        let margin = needles.map { ($0 as NSString).length }.max()! - 1
+        let lo = max(0, range.location - margin)
+        let before = NSRange(location: lo, length: min(length, NSMaxRange(range) + margin) - lo)
+        let old = string as NSString
+        let oldCounts = needles.map { old.occurrences(of: $0, in: before) }
+        super.replaceCharacters(in: range, with: str)
+        let after = NSRange(location: lo, length: before.length - range.length + (str as NSString).length)
+        let new = string as NSString
+        for (i, n) in needles.enumerated() {
+            delimiterCounts[n, default: 0] += new.occurrences(of: n, in: after) - oldCounts[i]
+        }
+        if length >= Self.maxTrackedLength { needles = []; delimiterCounts = [:] }
+    }
+}
+
 struct CustomTextEditor: NSViewRepresentable {
     /// Text to push into the editor when `loadGeneration` changes. While editing, the text
     /// view itself is the source of truth — keystrokes don't round-trip through SwiftUI.
@@ -2655,7 +2731,7 @@ struct CustomTextEditor: NSViewRepresentable {
         coordinator.currentEditorFont = editorFont
         coordinator.highlightr = highlightr
         
-        let textStorage = CodeAttributedString(highlightr: highlightr)
+        let textStorage = MangleCodeStorage(highlightr: highlightr)
         textStorage.language = nil
         textStorage.highlightDelegate = coordinator
         
@@ -2831,7 +2907,7 @@ struct CustomTextEditor: NSViewRepresentable {
         var scrollView: NSScrollView?
         weak var textView: MangleTextView?
         var highlightr: Highlightr?
-        var codeStorage: CodeAttributedString?
+        var codeStorage: MangleCodeStorage?
         var lastAppliedTheme: String?
         var currentEditorFont: EditorFont = .system
         // Feature 8
@@ -2896,7 +2972,7 @@ struct CustomTextEditor: NSViewRepresentable {
             let fg: NSColor = parent.isDark ? NSColor(white: 0.85, alpha: 1) : NSColor(white: 0.1, alpha: 1)
             storage.setAttributes([.font: font, .foregroundColor: fg], range: NSRange(location: 0, length: storage.length))
             storage.endEditing()
-            tokenCounts = [:]
+            tokenCounts = nil
             dirtyBlock = nil
             storage.language = language
             
@@ -3126,19 +3202,8 @@ struct CustomTextEditor: NSViewRepresentable {
         // repaint the whole document uncoloured, until each line was edited again. Our passes
         // are applied in order and only if the text and language still match.
 
-        private static let blockCommentLanguages: Set<String> = [
-            "c", "cpp", "java", "javascript", "typescript", "css", "scss", "less",
-            "swift", "kotlin", "go", "rust", "php", "graphql"
-        ]
-        private static func blockDelimiters(for language: String) -> [(open: String, close: String)] {
-            var result: [(String, String)] = []
-            if blockCommentLanguages.contains(language) { result.append(("/*", "*/")) }
-            if language == "xml" || language == "markdown" { result.append(("<!--", "-->")) }
-            if language == "python" { result.append(("\"\"\"", "\"\"\"")); result.append(("'''", "'''")) }
-            return result
-        }
-        /// Delimiter counts as of the last edit, keyed by opening delimiter.
-        private var tokenCounts: [String: (open: Int, close: Int)] = [:]
+        /// The storage's delimiter counts as of the last highlight pass.
+        private var tokenCounts: [String: Int]?
         /// Pending block re-highlight: earliest dirty location, distance of the latest dirty
         /// end from the end of the document (stable under edits before it), and whether it
         /// must run to the end of the document.
@@ -3152,24 +3217,11 @@ struct CustomTextEditor: NSViewRepresentable {
         private static let syncEditLimit = 2_000
         
         func shouldHighlight(_ range: NSRange) -> Bool {
-            guard let storage = codeStorage, let language = storage.language else { return false }
-            let text = storage.string as NSString
-            let len = text.length
-            let delimiters = len < 300_000 ? Self.blockDelimiters(for: language) : []
-            
+            guard let storage = codeStorage, storage.language != nil else { return false }
+            let len = storage.length
             let isFullPass = range.location == 0 && range.length >= len
-            var countsChanged = false
-            for d in delimiters {
-                let all = NSRange(location: 0, length: len)
-                let open = text.occurrences(of: d.open, in: all)
-                let close = d.open == d.close ? open : text.occurrences(of: d.close, in: all)
-                if let previous = tokenCounts[d.open], previous.open != open || previous.close != close {
-                    countsChanged = true
-                } else if tokenCounts[d.open] == nil {
-                    countsChanged = true
-                }
-                tokenCounts[d.open] = (open, close)
-            }
+            let countsChanged = storage.delimiterCounts != tokenCounts
+            tokenCounts = storage.delimiterCounts
             
             let toEnd = isFullPass || countsChanged
             let start = isFullPass ? 0 : range.location
@@ -3205,7 +3257,9 @@ struct CustomTextEditor: NSViewRepresentable {
             guard let storage = codeStorage, let language = storage.language else { return }
             let text = storage.string as NSString
             let len = text.length
-            let delimiters = Self.blockDelimiters(for: language)
+            // Delimiters that don't occur can't open a construct around the edit.
+            let delimiters = MangleCodeStorage.blockDelimiters(for: language)
+                .filter { !storage.isTrackingDelimiters || storage.delimiterCounts[$0.open, default: 0] > 0 }
             
             let dirtyStart = min(dirty.start, len)
             let dirtyEnd = max(dirtyStart, len - min(dirty.tail, len))
