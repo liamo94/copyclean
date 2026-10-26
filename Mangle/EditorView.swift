@@ -116,14 +116,8 @@ class LineNumberRulerView: NSRulerView {
     override func draw(_ dirtyRect: NSRect) {
         super.draw(dirtyRect)
         // Dim the gutter beside the lines a spotlight leaves out, as the editor does.
-        guard let textView = clientView as? MangleTextView, let lit = textView.spotlightSpan() else { return }
-        let offset = textView.visibleRect.origin.y
-        textView.backgroundColor.withAlphaComponent(MangleTextView.spotlightDimming).setFill()
-        for dim in [NSRect(x: 0, y: bounds.minY, width: bounds.width, height: lit.top - offset - bounds.minY),
-                    NSRect(x: 0, y: lit.bottom - offset, width: bounds.width, height: bounds.maxY - (lit.bottom - offset))] {
-            let rect = dim.intersection(dirtyRect)
-            if !rect.isEmpty { rect.fill(using: .sourceOver) }
-        }
+        guard let textView = clientView as? MangleTextView else { return }
+        textView.drawSpotlightDimming(in: bounds, scrolledBy: textView.visibleRect.origin.y, dirtyRect: dirtyRect)
     }
     
     override func drawHashMarksAndLabels(in rect: NSRect) {
@@ -317,6 +311,7 @@ struct EditorView: View {
     var onSave: () -> Void
     var onSaveAndPaste: () -> Void = {}
     var onClose: () -> Void
+    var onDiscard: () -> Void = {}
     var onNewScratch: () -> Void = {}
     var onTogglePresentation: () -> Void = {}
     var onTogglePresentationFullScreen: () -> Void = {}
@@ -518,8 +513,8 @@ struct EditorView: View {
                 // only hidden (never closed), so without this check its shortcuts fired in
                 // History/Settings and edited the hidden document.
                 guard let editorWindow = textView?.window, event.window === editorWindow else { return event }
-                // Shortcuts handled here (⌘Z, ⌘/…) never reach the text view's keyDown, so
-                // wake its caret for them too.
+                // Wakes the caret for every key, including shortcuts handled here (⌘Z, ⌘/…)
+                // that never reach the text view's keyDown.
                 if editorWindow.firstResponder === textView { (textView as? MangleTextView)?.noteInteraction() }
                 let mods = event.modifierFlags.intersection([.command, .shift, .option, .control])
                 
@@ -1437,11 +1432,11 @@ struct EditorView: View {
         onClose()
     }
 
-    /// ⌥⌘W: throws the document on screen away and hides the editor.
+    /// ⌥⌘W: throws the document on screen away (keeping unsaved text in history) and hides
+    /// the editor.
     private func discardDocument() {
         closeFindBar()
-        onClose()
-        viewModel.discard()
+        onDiscard()
     }
 
     private func closeFindBar() {
@@ -1765,13 +1760,14 @@ struct EditorView: View {
         let range = (tv as? MangleTextView)?.spotlightRange ?? NSRange(location: 0, length: text.length)
         var lines = text.substring(with: range).components(separatedBy: "\n")
         if lines.count > 1, lines.last?.isEmpty == true { lines.removeLast() }
-        let tab = String(repeating: " ", count: (tv as? MangleTextView)?.indentWidth ?? 4)
-        let longest = lines.map { $0.replacingOccurrences(of: "\t", with: tab) }.max { $0.count < $1.count } ?? ""
+        let tabWidth = (tv as? MangleTextView)?.indentWidth ?? 4
         
         // Text scales linearly with the font size, so measure once at a reference size.
+        // Every line is measured: the most characters isn't the widest with wide glyphs (CJK,
+        // emoji) in play.
         let reference: CGFloat = 100
         let font = settings.editorFont.nsFont(size: reference)
-        let width = (longest as NSString).size(withAttributes: [.font: font]).width
+        let width = lines.map { (Self.expandingTabs($0, width: tabWidth) as NSString).size(withAttributes: [.font: font]).width }.max() ?? 0
         let height = NSLayoutManager().defaultLineHeight(for: font) * CGFloat(lines.count)
         let inset = tv.textContainerInset
         let padding = (tv.textContainer?.lineFragmentPadding ?? 0) * 2
@@ -1783,24 +1779,37 @@ struct EditorView: View {
         let fitted = (min(available.width / width, available.height / height) * reference).rounded(.down)
         let bounds = SettingsManager.presentationFontSizeRange
         let size = min(max(fitted, bounds.lowerBound), bounds.upperBound)
+        let scroll = { Self.scrollToTop(of: range, in: tv) }
+        guard size != settings.presentationFontSize, let mtv = tv as? MangleTextView else { return scroll() }
+        // The new size reaches the text through a re-highlight (in the background for a long
+        // document); scrolling before it lands would measure the old layout.
+        mtv.afterRestyle = scroll
         settings.presentationFontSize = size
-        scrollToTop(of: range, in: tv, onceSized: size, until: Date().addingTimeInterval(2))
     }
     
-    /// Puts the first line of `range` at the top of the window. The new font size reaches
-    /// the text through a background re-highlight, so this waits (briefly) until it has —
-    /// scrolling before then would measure the old layout.
-    private func scrollToTop(of range: NSRange, in tv: NSTextView, onceSized size: CGFloat, until deadline: Date) {
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
-            guard let storage = tv.textStorage, let lm = tv.layoutManager, range.location < storage.length else { return }
-            let font = storage.attribute(.font, at: range.location, effectiveRange: nil) as? NSFont
-            if font?.pointSize != size, Date() < deadline {
-                scrollToTop(of: range, in: tv, onceSized: size, until: deadline)
-                return
+    /// `line` with each tab widened to the next tab stop, as the editor lays it out.
+    private static func expandingTabs(_ line: String, width: Int) -> String {
+        guard line.contains("\t") else { return line }
+        var result = ""
+        var column = 0
+        for character in line {
+            if character == "\t" {
+                let spaces = width - column % width
+                result += String(repeating: " ", count: spaces)
+                column += spaces
+            } else {
+                result.append(character)
+                column += 1
             }
-            let line = lm.lineFragmentRect(forGlyphAt: lm.glyphIndexForCharacter(at: range.location), effectiveRange: nil)
-            tv.scroll(NSPoint(x: 0, y: max(line.minY + tv.textContainerOrigin.y - tv.textContainerInset.height, 0)))
         }
+        return result
+    }
+    
+    /// Puts the first line of `range` at the top of the window.
+    private static func scrollToTop(of range: NSRange, in tv: NSTextView) {
+        guard let storage = tv.textStorage, let lm = tv.layoutManager, range.location < storage.length else { return }
+        let line = lm.lineFragmentRect(forGlyphAt: lm.glyphIndexForCharacter(at: range.location), effectiveRange: nil)
+        tv.scroll(NSPoint(x: 0, y: max(line.minY + tv.textContainerOrigin.y - tv.textContainerInset.height, 0)))
     }
     
     /// Zooms the editor, or the presentation size while presenting.
@@ -2133,7 +2142,7 @@ final class MangleTextView: NSTextView {
     // MARK: Key interception (most reliable — fires before interpretKeyEvents)
     
     override func keyDown(with event: NSEvent) {
-        noteInteraction()
+        // (The editor's key monitor has already woken the caret for this key.)
         // While a spotlight is up, ← / → step it a line at a time instead of collapsing it.
         if spotlightRange != nil, event.modifierFlags.intersection([.command, .option, .control, .shift]).isEmpty,
            event.keyCode == 123 || event.keyCode == 124 {
@@ -2554,7 +2563,7 @@ final class MangleTextView: NSTextView {
                 if let rect = caretRect(at: location), rect.intersects(dirtyRect) { rect.fill() }
             }
         }
-        drawSpotlight(in: dirtyRect)
+        drawSpotlightDimming(in: bounds, dirtyRect: dirtyRect)
     }
     
     // MARK: Presentation
@@ -2570,6 +2579,9 @@ final class MangleTextView: NSTextView {
             updateCaretVisibility()
         }
     }
+    
+    /// Runs once, after the next whole-document re-highlight lands (a font or theme change).
+    var afterRestyle: (() -> Void)?
     
     /// The theme's caret colour; `insertionPointColor` follows it unless the caret is hidden.
     var caretColor: NSColor = .textColor { didSet { updateCaretVisibility() } }
@@ -2637,13 +2649,16 @@ final class MangleTextView: NSTextView {
         setSelectedRange(NSRange(location: spotlight.location, length: 0))
     }
     
-    private func drawSpotlight(in dirtyRect: NSRect) {
+    /// Dims `rect` above and below the spotlight, for this view or (with the scroll offset)
+    /// the gutter beside it.
+    func drawSpotlightDimming(in rect: NSRect, scrolledBy offset: CGFloat = 0, dirtyRect: NSRect) {
         guard let (top, bottom) = spotlightSpan() else { return }
+        let litTop = top - offset, litBottom = bottom - offset
         backgroundColor.withAlphaComponent(Self.spotlightDimming).setFill()
-        for dim in [NSRect(x: bounds.minX, y: bounds.minY, width: bounds.width, height: top - bounds.minY),
-                    NSRect(x: bounds.minX, y: bottom, width: bounds.width, height: bounds.maxY - bottom)] {
-            let rect = dim.intersection(dirtyRect)
-            if !rect.isEmpty { rect.fill(using: .sourceOver) }
+        for dim in [NSRect(x: rect.minX, y: rect.minY, width: rect.width, height: max(0, litTop - rect.minY)),
+                    NSRect(x: rect.minX, y: litBottom, width: rect.width, height: max(0, rect.maxY - litBottom))] {
+            let fill = dim.intersection(dirtyRect)
+            if !fill.isEmpty { fill.fill(using: .sourceOver) }
         }
     }
     
@@ -2651,29 +2666,33 @@ final class MangleTextView: NSTextView {
     /// starts from the line at the caret. (A bigger spotlight is a drag away.)
     func spotlightStep(forward: Bool) {
         let text = string as NSString
-        var steps: [NSRange] = []
-        var location = 0
-        while location < text.length {
-            var lineEnd = 0, contentsEnd = 0
-            text.getLineStart(nil, end: &lineEnd, contentsEnd: &contentsEnd, for: NSRange(location: location, length: 0))
-            let contents = NSRange(location: location, length: contentsEnd - location)
+        let current = spotlightRange
+        // Walk line by line from where the search starts, so a step costs the distance it
+        // moves rather than the document's length.
+        var location: Int
+        switch (forward, current) {
+        case (true, let current?): location = NSMaxRange(current)
+        case (false, let current?): location = current.location - 1
+        case (_, nil): location = min(selectedRange().location, text.length)
+        }
+        // The caret can sit at the very end, on a last line with no newline after it.
+        while location >= 0, location < text.length || (location == text.length && current == nil) {
+            var lineStart = 0, lineEnd = 0, contentsEnd = 0
+            text.getLineStart(&lineStart, end: &lineEnd, contentsEnd: &contentsEnd, for: NSRange(location: location, length: 0))
+            let contents = NSRange(location: lineStart, length: contentsEnd - lineStart)
             if text.rangeOfCharacter(from: CharacterSet.whitespaces.inverted, options: [], range: contents).location != NSNotFound {
-                steps.append(contents)
+                setSelectedRange(contents)
+                scrollRangeToVisible(contents)
+                return
             }
-            location = lineEnd
+            if forward {
+                guard lineEnd > location else { return }
+                location = lineEnd
+            } else {
+                guard lineStart > 0 else { return }
+                location = lineStart - 1
+            }
         }
-        
-        let caret = selectedRange().location
-        let target: NSRange?
-        switch (forward, spotlightRange) {
-        case (true, let current?): target = steps.first { $0.location >= NSMaxRange(current) }
-        case (true, nil): target = steps.first { NSMaxRange($0) >= caret }
-        case (false, let current?): target = steps.last { NSMaxRange($0) <= current.location }
-        case (false, nil): target = steps.last { $0.location <= caret }
-        }
-        guard let target else { return }
-        setSelectedRange(target)
-        scrollRangeToVisible(target)
     }
     
     override func viewDidChangeEffectiveAppearance() {
@@ -3504,11 +3523,11 @@ struct CustomTextEditor: NSViewRepresentable {
             
             let dirtyStart = min(dirty.start, len)
             let dirtyEnd = max(dirtyStart, len - min(dirty.tail, len))
-            // The lines the dirty span touches. Highlightr's span ends after a newline, so
-            // looking up the line *at* dirtyEnd would pull in the next line too.
-            let dirtyLines = text.lineRange(for: NSRange(location: dirtyStart, length: dirtyEnd - dirtyStart))
-            var start = dirtyLines.location
-            var end = NSMaxRange(dirtyLines)
+            // Highlightr's span ends after a newline, so the line *at* dirtyEnd is the one after
+            // the edit. Keep it: Return mid-line moves the rest of the line there, and it needs
+            // recolouring too.
+            var start = text.lineRange(for: NSRange(location: dirtyStart, length: 0)).location
+            var end = NSMaxRange(text.lineRange(for: NSRange(location: dirtyEnd, length: 0)))
             if dirty.toEnd { end = len }
             for d in delimiters {
                 guard let opener = blockOpener(before: dirtyStart, open: d.open, close: d.close, in: text) else { continue }
@@ -3529,6 +3548,7 @@ struct CustomTextEditor: NSViewRepresentable {
         private func highlightRegion(_ region: NSRange, language: String) {
             guard let storage = codeStorage, let highlightr else { return }
             let code = (storage.string as NSString).substring(with: region)
+            let isWholeDocument = region.location == 0 && region.length == storage.length
             
             func apply(_ highlighted: NSAttributedString) -> Bool {
                 // Drop stale results: the text changed or the language switched meanwhile.
@@ -3541,10 +3561,13 @@ struct CustomTextEditor: NSViewRepresentable {
                     storage.setAttributes(attrs, range: NSRange(location: region.location + r.location, length: r.length))
                 }
                 storage.endEditing()
+                if isWholeDocument, let textView, let then = textView.afterRestyle {
+                    textView.afterRestyle = nil
+                    then()
+                }
                 return true
             }
             
-            let isWholeDocument = region.location == 0 && region.length == storage.length
             if region.length <= (isWholeDocument ? Self.syncDocumentLimit : Self.syncEditLimit) {
                 if let highlighted = highlightr.highlight(code, as: language) { _ = apply(highlighted) }
                 return

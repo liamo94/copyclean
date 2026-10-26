@@ -50,6 +50,9 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMenuDele
     private var frameBeforePresenting: NSRect?
     /// Runs once the editor has left full screen (see `exitFullScreen(then:)`).
     private var afterFullScreenExit: (() -> Void)?
+    /// Between windowWillEnterFullScreen and its did/didFail. A toggle sent then can be ignored,
+    /// so an exit asked for meanwhile waits for the window to arrive.
+    private var isEnteringFullScreen = false
     private static let editorCollectionBehavior: NSWindow.CollectionBehavior = [.moveToActiveSpace, .fullScreenAuxiliary]
     
     func applicationDidFinishLaunching(_ notification: Notification) {
@@ -62,8 +65,13 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMenuDele
         // The sandbox blocks the quit Apple Event behind `terminate()`, so the request goes
         // out as a distributed notification that every copy listens for.
         let ownPID = String(ProcessInfo.processInfo.processIdentifier)
+        // Only a newer copy of this same app wins, so two launched together (login item and a
+        // manual open) don't quit each other.
         DistributedNotificationCenter.default().addObserver(forName: Self.takeOverNotification, object: nil, queue: .main) { note in
-            guard note.object as? String != ownPID else { return }
+            guard let sender = (note.object as? String).flatMap(pid_t.init),
+                  let other = NSRunningApplication(processIdentifier: sender),
+                  other.bundleIdentifier == Bundle.main.bundleIdentifier,
+                  Self.launched(.current, before: other) else { return }
             NSApp.terminate(nil)
         }
         let others = Bundle.main.bundleIdentifier.map {
@@ -86,6 +94,12 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMenuDele
             }
         }
         waitForExit()
+    }
+
+    /// Launch order, with the process ID breaking a tie (or a missing launch date).
+    private static func launched(_ a: NSRunningApplication, before b: NSRunningApplication) -> Bool {
+        if let dateA = a.launchDate, let dateB = b.launchDate, dateA != dateB { return dateA < dateB }
+        return a.processIdentifier < b.processIdentifier
     }
 
     private func finishLaunching() {
@@ -313,6 +327,15 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMenuDele
         showToast(isScratch ? "Scratch saved to History" : "Previous edit saved to History")
     }
     
+    /// ⌥⌘W: throws away the document on screen and hides the editor. Unsaved text still
+    /// goes to history first — ⌥⌘W is also "Close All", so it's easy to press by habit.
+    func discardDocument() {
+        let current = editorViewModel.buffer(scratch: editorViewModel.isScratch)
+        if current.isDirty { stash(current.text, isScratch: editorViewModel.isScratch) }
+        dismissEditor()
+        editorViewModel.discard()
+    }
+    
     /// Hides the editor at the user's request (Esc, ⌘W, the close button, the hotkey again).
     func dismissEditor() {
         closeEditor()
@@ -368,7 +391,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMenuDele
     /// While presenting: native full screen, filling the display on its own Space with the
     /// menu bar and Dock out of the way.
     func togglePresentationFullScreen() {
-        guard let window = editorWindow, editorViewModel.isPresenting, afterFullScreenExit == nil else { return }
+        guard let window = editorWindow, editorViewModel.isPresenting, afterFullScreenExit == nil, !isEnteringFullScreen else { return }
         // Full screen needs a primary window; the editor is normally auxiliary, so it can
         // open over other apps' full-screen Spaces.
         if !window.styleMask.contains(.fullScreen) { window.collectionBehavior = [.fullScreenPrimary] }
@@ -377,16 +400,37 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMenuDele
     
     /// Leaves full screen and runs `then` once the window is back in place. False (and
     /// `then` isn't run) when the editor isn't full screen. Asked again mid-exit (Esc twice,
-    /// Esc then ⌘W), it queues `then` rather than toggling back into full screen.
+    /// Esc then ⌘W), it queues `then` rather than toggling back into full screen. Asked while
+    /// entering, it leaves once the window has arrived.
     private func exitFullScreen(then: @escaping () -> Void) -> Bool {
         if let pending = afterFullScreenExit {
             afterFullScreenExit = { pending(); then() }
             return true
         }
-        guard let window = editorWindow, window.styleMask.contains(.fullScreen) else { return false }
+        guard let window = editorWindow, isEnteringFullScreen || window.styleMask.contains(.fullScreen) else { return false }
         afterFullScreenExit = then
-        window.toggleFullScreen(nil)
+        if !isEnteringFullScreen { window.toggleFullScreen(nil) }
         return true
+    }
+    
+    func windowWillEnterFullScreen(_ notification: Notification) {
+        guard notification.object as? NSWindow === editorWindow else { return }
+        isEnteringFullScreen = true
+    }
+    
+    func windowDidEnterFullScreen(_ notification: Notification) {
+        guard let window = notification.object as? NSWindow, window === editorWindow else { return }
+        isEnteringFullScreen = false
+        if afterFullScreenExit != nil { window.toggleFullScreen(nil) }
+    }
+    
+    func windowDidFailToEnterFullScreen(_ window: NSWindow) {
+        guard window === editorWindow else { return }
+        isEnteringFullScreen = false
+        window.collectionBehavior = Self.editorCollectionBehavior
+        let then = afterFullScreenExit
+        afterFullScreenExit = nil
+        then?()
     }
     
     func windowDidExitFullScreen(_ notification: Notification) {
@@ -978,6 +1022,8 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMenuDele
             self?.saveAndPaste()
         }, onClose: { [weak self] in
             self?.dismissEditor()
+        }, onDiscard: { [weak self] in
+            self?.discardDocument()
         }, onNewScratch: { [weak self] in
             self?.newScratch()
         }, onTogglePresentation: { [weak self] in
