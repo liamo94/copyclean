@@ -63,6 +63,9 @@ class LineNumberRulerView: NSRulerView {
     
     override var isFlipped: Bool { true }
     override var requiredThickness: CGFloat { thickness }
+    /// Views stopped clipping by default in macOS 14; with `draw(_:)` overridden, the ruler's
+    /// background otherwise paints over the whole editor and hides the text.
+    override var clipsToBounds: Bool { get { true } set {} }
     
     override func updateTrackingAreas() {
         super.updateTrackingAreas()
