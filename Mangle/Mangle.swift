@@ -42,6 +42,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMenuDele
     private var writtenScratchDraft: EditorDraft?
     private static let editorSizeKey = "EditorWindowSize"
     private static let historySizeKey = "HistoryWindowSize"
+    private static let takeOverNotification = Notification.Name("liamo.co.mangle.takeOver")
     /// Global monitor for the ⌘C ⌘C trigger (see `updateDoubleCopyMonitor`).
     private var doubleCopyMonitor: Any?
     private var lastCopyPress: Date = .distantPast
@@ -55,6 +56,13 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMenuDele
         // hotkeys, so each would open its own editor. The newest launch takes over — but only
         // once the old copy has exited, so its unsaved draft and history are on disk before
         // we read them and its hotkeys are free to register.
+        // The sandbox blocks the quit Apple Event behind `terminate()`, so the request goes
+        // out as a distributed notification that every copy listens for.
+        let ownPID = String(ProcessInfo.processInfo.processIdentifier)
+        DistributedNotificationCenter.default().addObserver(forName: Self.takeOverNotification, object: nil, queue: .main) { note in
+            guard note.object as? String != ownPID else { return }
+            NSApp.terminate(nil)
+        }
         let others = Bundle.main.bundleIdentifier.map {
             NSRunningApplication.runningApplications(withBundleIdentifier: $0)
                 .filter { $0 != NSRunningApplication.current }
@@ -63,6 +71,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMenuDele
             finishLaunching()
             return
         }
+        DistributedNotificationCenter.default().postNotificationName(Self.takeOverNotification, object: ownPID, userInfo: nil, deliverImmediately: true)
         others.forEach { $0.terminate() }
         let deadline = Date().addingTimeInterval(3)
         func waitForExit() {
