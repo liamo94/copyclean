@@ -119,7 +119,8 @@ nonisolated enum TextTransforms {
     static func trimTrailingWhitespace(_ text: String) -> String {
         // Trailing whitespace only — dedenting is Normalize Indentation's job.
         text.components(separatedBy: "\n")
-            .map { $0.replacingOccurrences(of: "\\s+$", with: "", options: .regularExpression) }
+            // Leave a CRLF line's "\r" in place: it's the line ending, not trailing whitespace.
+            .map { $0.replacingOccurrences(of: "[^\\S\\r\\n]+(\\r?)$", with: "$1", options: .regularExpression) }
             .joined(separator: "\n")
     }
 
@@ -144,7 +145,7 @@ nonisolated enum TextTransforms {
 
     static func removeBlankLines(_ text: String) -> String {
         text.components(separatedBy: "\n")
-            .filter { !$0.trimmingCharacters(in: .whitespaces).isEmpty }
+            .filter { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
             .joined(separator: "\n")
     }
 
@@ -309,8 +310,12 @@ nonisolated enum TextTransforms {
         return decoded
     }
 
+    private static let unreservedURLCharacters = CharacterSet(charactersIn:
+        "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-._~")
+
     static func urlEncode(_ text: String) -> String {
-        text.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed) ?? text
+        // RFC 3986 unreserved characters only, so the result is safe as a query value or path segment.
+        text.addingPercentEncoding(withAllowedCharacters: unreservedURLCharacters) ?? text
     }
 
     static func urlDecode(_ text: String) throws -> String {
@@ -655,6 +660,7 @@ nonisolated enum FoldScanner {
         var line = 1
         var inString = false
         var escaped = false
+        var afterCR = false
         let chunk = 4096
         var location = 0
         withUnsafeTemporaryAllocation(of: unichar.self, capacity: chunk) { buf in
@@ -664,8 +670,11 @@ nonisolated enum FoldScanner {
                 text.getCharacters(base, range: NSRange(location: location, length: n))
                 for i in 0..<n {
                     let c = base[i]
-                    if c == 10 {
-                        line += 1
+                    let wasAfterCR = afterCR
+                    afterCR = c == 13
+                    if c == 10 || c == 13 {
+                        // LF, CR and CRLF each end one line.
+                        if !(c == 10 && wasAfterCR) { line += 1 }
                         // Strings don't span lines; an unterminated quote must not swallow the rest.
                         inString = false
                         escaped = false
