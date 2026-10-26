@@ -28,8 +28,10 @@ open class Highlightr
     /// This block will be called every time the theme changes.
     open var themeChanged : ((Theme) -> Void)?
 
-    /// Defaults to `false` - when `true`, forces highlighting to finish even if illegal syntax is detected.
-    open var ignoreIllegals = false
+    /// Defaults to `true` - forces highlighting to finish even if illegal syntax is detected.
+    /// When `false`, one illegal token (say, an unquoted JSON key) returns the whole input
+    /// uncoloured, and text being edited is invalid most of the time.
+    open var ignoreIllegals = true
 
     private let hljs: JSValue
 

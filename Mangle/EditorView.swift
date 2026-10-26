@@ -3263,8 +3263,11 @@ struct CustomTextEditor: NSViewRepresentable {
             
             let dirtyStart = min(dirty.start, len)
             let dirtyEnd = max(dirtyStart, len - min(dirty.tail, len))
-            var start = text.lineRange(for: NSRange(location: dirtyStart, length: 0)).location
-            var end = NSMaxRange(text.lineRange(for: NSRange(location: dirtyEnd, length: 0)))
+            // The lines the dirty span touches. Highlightr's span ends after a newline, so
+            // looking up the line *at* dirtyEnd would pull in the next line too.
+            let dirtyLines = text.lineRange(for: NSRange(location: dirtyStart, length: dirtyEnd - dirtyStart))
+            var start = dirtyLines.location
+            var end = NSMaxRange(dirtyLines)
             if dirty.toEnd { end = len }
             for d in delimiters {
                 guard let opener = blockOpener(before: dirtyStart, open: d.open, close: d.close, in: text) else { continue }
