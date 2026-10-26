@@ -439,12 +439,17 @@ struct SettingsView: View {
                 
                 Divider()
 
+                Text("Default Indentation")
+                    .font(.caption.weight(.semibold))
+                    .foregroundColor(.secondary)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+
                 HStack {
-                    Text("Tab Size")
+                    Text("Indent Width")
                     Spacer()
                     Picker("", selection: $tabSize) {
-                        Text("2 spaces").tag(2)
-                        Text("4 spaces").tag(4)
+                        Text("2").tag(2)
+                        Text("4").tag(4)
                     }
                     .pickerStyle(.segmented)
                     .labelsHidden()
@@ -459,7 +464,12 @@ struct SettingsView: View {
                     Toggle("", isOn: $useTabs)
                         .labelsHidden()
                 }
-                .help("Used when a document's own indentation can't be detected")
+
+                Text("Used for new documents and text whose indentation can't be detected. Change a document's own indentation from the bottom bar.")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .fixedSize(horizontal: false, vertical: true)
 
                 Divider()
 
