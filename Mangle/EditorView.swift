@@ -618,6 +618,7 @@ struct EditorView: View {
                 if mods == .control, key == "g" { openPalette(query: ":"); return nil }
                 if mods == .command, key == "n" { onNewScratch(); return nil }
                 if mods == .command, key == "w" { cancelEditor(); return nil }
+                if mods == [.command, .option], key == "w" { discardDocument(); return nil }
                 if mods == .command, key == "t" { showTransformMenu(); return nil }
                 if mods == [.command, .option], key == "p" { onTogglePresentation(); return nil }
                 if mods == [.command, .control], key == "f", viewModel.isPresenting { onTogglePresentationFullScreen(); return nil }
@@ -1436,8 +1437,7 @@ struct EditorView: View {
         onClose()
     }
 
-    /// Palette only — no shortcut, so it can't be hit by accident next to ⌘⌫ / ⌥⌫.
-    /// Throws the document on screen away and hides the editor.
+    /// ⌥⌘W: throws the document on screen away and hides the editor.
     private func discardDocument() {
         closeFindBar()
         onClose()
@@ -1556,7 +1556,7 @@ struct EditorView: View {
                           detail: viewModel.isScratch ? "Not available for scratch pads" : (viewModel.isDirty ? nil : "No changes yet"),
                           run: revertToOriginal),
             EditorCommand(title: "New Scratch", section: "File", shortcut: "⌘N", run: onNewScratch),
-            EditorCommand(title: viewModel.isScratch ? "Discard Scratch Pad" : "Discard Edit", section: "File",
+            EditorCommand(title: viewModel.isScratch ? "Discard Scratch Pad" : "Discard Edit", section: "File", shortcut: "⌥⌘W",
                           key: "File/Discard", run: discardDocument),
             EditorCommand(title: viewModel.isScratch ? "Hide Scratch Pad" : "Hide Editor", section: "File", shortcut: "Esc",
                           key: "File/Close", run: cancelEditor),
@@ -3917,6 +3917,7 @@ private struct ShortcutsPopover: View {
             ("⌘ ↩",        "Save and paste into previous app"),
             ("⌘ N",        "New scratch pad"),
             ("Esc  ⌘ W",   "Hide editor"),
+            ("⌥ ⌘ W",      "Discard and hide editor"),
         ]),
         ("Editing", [
             ("⌘ Z",        "Undo"),
