@@ -114,7 +114,7 @@
 			mainGroup = 0C72C6E12F2A714A006B1EAF;
 			minimizedProjectReferenceProxies = 1;
 			packageReferences = (
-				AA000001AA0000AA000001AA /* XCRemoteSwiftPackageReference "Highlightr" */,
+				AA000001AA0000AA000001AA /* XCLocalSwiftPackageReference "Vendor/Highlightr" */,
 			);
 			preferredProjectObjectVersion = 77;
 			productRefGroup = 0C72C6EB2F2A714A006B1EAF /* Products */;
@@ -382,21 +382,17 @@
 		};
 /* End XCConfigurationList section */
 
-/* Begin XCRemoteSwiftPackageReference section */
-		AA000001AA0000AA000001AA /* XCRemoteSwiftPackageReference "Highlightr" */ = {
-			isa = XCRemoteSwiftPackageReference;
-			repositoryURL = "https://github.com/raspu/Highlightr.git";
-			requirement = {
-				kind = upToNextMajorVersion;
-				minimumVersion = 2.1.2;
-			};
+/* Begin XCLocalSwiftPackageReference section */
+		AA000001AA0000AA000001AA /* XCLocalSwiftPackageReference "Vendor/Highlightr" */ = {
+			isa = XCLocalSwiftPackageReference;
+			relativePath = Vendor/Highlightr;
 		};
-/* End XCRemoteSwiftPackageReference section */
+/* End XCLocalSwiftPackageReference section */
 
 /* Begin XCSwiftPackageProductDependency section */
 		AA000002AA0000AA000002AA /* Highlightr */ = {
 			isa = XCSwiftPackageProductDependency;
-			package = AA000001AA0000AA000001AA /* XCRemoteSwiftPackageReference "Highlightr" */;
+			package = AA000001AA0000AA000001AA /* XCLocalSwiftPackageReference "Vendor/Highlightr" */;
 			productName = Highlightr;
 		};
 /* End XCSwiftPackageProductDependency section */
