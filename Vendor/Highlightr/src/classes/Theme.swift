@@ -133,15 +133,24 @@ open class Theme {
         {
             var attrs = [AttributedStringKey: Any]()
             attrs[.font] = codeFont
+            // highlight.js 11 puts several classes on one span ("hljs-title function_"): style
+            // each, then the compound selector (.hljs-title.function_), which wins.
+            var keys = [String]()
             for style in styleList
             {
-                var style = style
+                let classes = style.split(separator: " ").map(String.init)
+                keys += classes
+                if classes.count > 1 { keys.append(classes.joined()) }
+            }
+            for key in keys
+            {
+                var style = key
 
-                if styleList.contains("hljs-title") && styleList.contains("hljs-function") && themeDict["hljs-function-hljs-title"] != nil {
+                if keys.contains("hljs-title") && keys.contains("hljs-function") && themeDict["hljs-function-hljs-title"] != nil {
                     style = "hljs-function-hljs-title"
                 }
 
-                if styleList.contains("hljs-title") && styleList.contains("hljs-class") && themeDict["hljs-class-hljs-title"] != nil {
+                if keys.contains("hljs-title") && keys.contains("hljs-class") && themeDict["hljs-class-hljs-title"] != nil {
                     style = "hljs-class-hljs-title"
                 }
 
@@ -168,7 +177,10 @@ open class Theme {
     {
         let themeString = Theme.removingMediaBlocks(themeString)
         let objcString = (themeString as NSString)
-        let cssRegex = try! NSRegularExpression(pattern: "(?:(\\.[a-zA-Z0-9\\-_]*(?:[, ]\\.[a-zA-Z0-9\\-_]*)*)\\{([^\\}]*?)\\})", options:[.caseInsensitive])
+        // Selectors may be compound (.hljs-title.class_); their dots are dropped from the key
+        // later, matching the joined classes `applyStyleToString` looks up.
+        let selector = "\\.[a-zA-Z0-9\\-_]*(?:\\.[a-zA-Z0-9\\-_]+)*"
+        let cssRegex = try! NSRegularExpression(pattern: "(?:(\(selector)(?:[, ]\(selector))*)\\{([^\\}]*?)\\})", options:[.caseInsensitive])
         
         let results = cssRegex.matches(in: themeString,
                                                options: [.reportCompletion],
@@ -203,17 +215,17 @@ open class Theme {
         
         for (keys,result) in resultDict
         {
-            let keyArray = keys.replacingOccurrences(of: " ", with: ",").components(separatedBy: ",")
+            // Only the descendant selector itself becomes the combined key — not every
+            // selector it's listed with (that took .hljs-built_in's colour, among others).
+            let keyArray = keys.components(separatedBy: ",").flatMap { selector -> [String] in
+                let selector = selector.trimmingCharacters(in: .whitespaces)
+                switch selector {
+                case ".hljs-function .hljs-title": return ["hljs-function-hljs-title"]
+                case ".hljs-class .hljs-title": return ["hljs-class-hljs-title"]
+                default: return selector.components(separatedBy: " ")
+                }
+            }
             for key in keyArray {
-                var key = key
-                if keyArray.contains(".hljs-title") && keyArray.contains(".hljs-function") {
-                    key = "hljs-function-hljs-title"
-                }
-
-                if keyArray.contains(".hljs-title") && keyArray.contains(".hljs-class") {
-                    key = "hljs-class-hljs-title"
-                }
-
                 var props : [String:String]?
                 props = returnDict[key]
                 if props == nil {

@@ -6,6 +6,8 @@ Local changes in `src/classes/Theme.swift`'s CSS parsing:
 - CSS colour names (`gold`, `navy`, `grey`, …), `rgb()`/`rgba()` and `#rgba`/`#rrggbbaa` parse instead of falling back to gray.
 - `color:inherit` is ignored rather than parsed as gray.
 - A named `.hljs` background (far's `navy`) no longer crashes.
+- Spans with several classes (highlight.js 11's `hljs-title function_`) get each class's style, then the compound selector's (`.hljs-title.class_`), which wins. Both were missed, so function names and calls were uncoloured.
+- A descendant selector (`.hljs-class .hljs-title`) no longer takes over the other selectors in its list, which cost `.hljs-built_in` its colour.
 
 Still unsupported: `var(--…)`, which the cybertopia themes use.
 
