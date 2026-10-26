@@ -374,165 +374,145 @@ struct SettingsView: View {
                 }
             }
             
-            Text("Keyboard Shortcuts")
-                .font(.headline)
-            
-            VStack(spacing: 12) {
-                HStack {
-                    Text("Press ⌘C Twice to Edit")
-                    Spacer()
-                    Toggle("", isOn: $doubleCopyOpensEditor)
-                        .labelsHidden()
-                }
-                .help("Copy, then press ⌘C again quickly to open the copied text in the editor. Requires Accessibility access.")
-                Divider()
-                ShortcutRecorder(title: "Open Editor", shortcut: $editorShortcut)
-                ShortcutRecorder(title: "Recent Snippets", shortcut: $historyShortcut)
-                ShortcutRecorder(title: "Scratch Pad", shortcut: $scratchShortcut)
-            }
-            .padding()
-            .background(Color(nsColor: .controlBackgroundColor))
-            .cornerRadius(8)
-            
-            Text("Click a shortcut and press a new key combination.\nMust include ⌘ or ⌃. Press Esc to cancel.")
-                .font(.caption)
-                .foregroundColor(.secondary)
-                .multilineTextAlignment(.center)
-            
-            VStack(spacing: 12) {
-                HStack {
-                    Text("Launch at Login")
-                    Spacer()
-                    Toggle("", isOn: Binding(
-                        get: { SMAppService.mainApp.status == .enabled },
-                        set: { newValue in
-                            do {
-                                if newValue {
-                                    try SMAppService.mainApp.register()
-                                } else {
-                                    try SMAppService.mainApp.unregister()
+            HStack(alignment: .top, spacing: 20) {
+                VStack(spacing: 20) {
+                    section("Keyboard Shortcuts", caption: "Click a shortcut and press a new key combination. Must include ⌘ or ⌃. Press Esc to cancel.") {
+                        HStack {
+                            Text("Press ⌘C Twice to Edit")
+                            Spacer()
+                            Toggle("", isOn: $doubleCopyOpensEditor)
+                                .labelsHidden()
+                        }
+                        .help("Copy, then press ⌘C again quickly to open the copied text in the editor. Requires Accessibility access.")
+                        Divider()
+                        ShortcutRecorder(title: "Open Editor", shortcut: $editorShortcut)
+                        ShortcutRecorder(title: "Recent Snippets", shortcut: $historyShortcut)
+                        ShortcutRecorder(title: "Scratch Pad", shortcut: $scratchShortcut)
+                    }
+                    
+                    section("General") {
+                        HStack {
+                            Text("Launch at Login")
+                            Spacer()
+                            Toggle("", isOn: Binding(
+                                get: { SMAppService.mainApp.status == .enabled },
+                                set: { newValue in
+                                    do {
+                                        if newValue {
+                                            try SMAppService.mainApp.register()
+                                        } else {
+                                            try SMAppService.mainApp.unregister()
+                                        }
+                                    } catch {
+                                        // login item update failed — silently ignore
+                                    }
                                 }
-                            } catch {
-                                // login item update failed — silently ignore
+                            ))
+                            .labelsHidden()
+                        }
+                        
+                        Divider()
+                        
+                        HStack {
+                            Text("Pause History")
+                            Spacer()
+                            Toggle("", isOn: $pauseHistory)
+                                .labelsHidden()
+                        }
+                        
+                        Divider()
+                        
+                        HStack {
+                            Text("History Limit")
+                            Spacer()
+                            Stepper("\(maxHistory) entries", value: $maxHistory, in: 10...500, step: 10)
+                        }
+                        
+                        Divider()
+                        
+                        HStack {
+                            Text("Clear History")
+                            Spacer()
+                            Button("Clear") {
+                                showClearConfirm = true
+                            }
+                            .alert("Clear History", isPresented: $showClearConfirm) {
+                                Button("Cancel", role: .cancel) {}
+                                Button("Clear", role: .destructive) {
+                                    NotificationCenter.default.post(name: .clearHistory, object: nil)
+                                }
+                            } message: {
+                                Text("This will permanently delete all clipboard history.")
                             }
                         }
-                    ))
-                    .labelsHidden()
-                }
-                
-                Divider()
-                
-                HStack {
-                    Text("Pause History")
-                    Spacer()
-                    Toggle("", isOn: $pauseHistory)
-                        .labelsHidden()
-                }
-                
-                Divider()
-                
-                HStack {
-                    Text("History Limit")
-                    Spacer()
-                    Stepper("\(maxHistory) entries", value: $maxHistory, in: 10...500, step: 10)
-                }
-                
-                Divider()
-
-                Text("Default Indentation")
-                    .font(.caption.weight(.semibold))
-                    .foregroundColor(.secondary)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-
-                HStack {
-                    Text("Indent Width")
-                    Spacer()
-                    Picker("", selection: $tabSize) {
-                        Text("2").tag(2)
-                        Text("4").tag(4)
                     }
-                    .pickerStyle(.segmented)
-                    .labelsHidden()
-                    .frame(width: 140)
                 }
                 
-                Divider()
-                
-                HStack {
-                    Text("Indent With Tabs")
-                    Spacer()
-                    Toggle("", isOn: $useTabs)
-                        .labelsHidden()
-                }
-
-                Text("Used for new documents and text whose indentation can't be detected. Change a document's own indentation from the bottom bar.")
-                    .font(.caption)
-                    .foregroundColor(.secondary)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .fixedSize(horizontal: false, vertical: true)
-
-                Divider()
-
-                HStack {
-                    Text("Editor Font")
-                    Spacer()
-                    Picker("", selection: $editorFont) {
-                        ForEach(EditorFont.allCases) { font in
-                            Text(font.rawValue).tag(font)
+                VStack(spacing: 20) {
+                    section("Editor") {
+                        HStack {
+                            Text("Font")
+                            Spacer()
+                            Picker("", selection: $editorFont) {
+                                ForEach(EditorFont.allCases) { font in
+                                    Text(font.rawValue).tag(font)
+                                }
+                            }
+                            .labelsHidden()
+                            .frame(width: 160)
                         }
-                    }
-                    .labelsHidden()
-                    .frame(width: 160)
-                }
-                
-                Divider()
-                
-                HStack {
-                    Text("Dark Theme")
-                    Spacer()
-                    themePicker($darkTheme)
-                }
-                
-                Divider()
-                
-                HStack {
-                    Text("Light Theme")
-                    Spacer()
-                    themePicker($lightTheme)
-                }
-                
-                Divider()
-                
-                HStack {
-                    Text("High Contrast When Presenting")
-                    Spacer()
-                    Toggle("", isOn: $presentationHighContrast)
-                        .labelsHidden()
-                }
-                .help("Presentation mode (⌥⌘P) switches to an accessible high-contrast theme")
-
-                Divider()
-
-                HStack {
-                    Text("Clear History")
-                    Spacer()
-                    Button("Clear") {
-                        showClearConfirm = true
-                    }
-                    .alert("Clear History", isPresented: $showClearConfirm) {
-                        Button("Cancel", role: .cancel) {}
-                        Button("Clear", role: .destructive) {
-                            NotificationCenter.default.post(name: .clearHistory, object: nil)
+                        
+                        Divider()
+                        
+                        HStack {
+                            Text("Dark Theme")
+                            Spacer()
+                            themePicker($darkTheme)
                         }
-                    } message: {
-                        Text("This will permanently delete all clipboard history.")
+                        
+                        Divider()
+                        
+                        HStack {
+                            Text("Light Theme")
+                            Spacer()
+                            themePicker($lightTheme)
+                        }
+                        
+                        Divider()
+                        
+                        HStack {
+                            Text("High Contrast When Presenting")
+                            Spacer()
+                            Toggle("", isOn: $presentationHighContrast)
+                                .labelsHidden()
+                        }
+                        .help("Presentation mode (⌥⌘P) switches to an accessible high-contrast theme")
+                    }
+                    
+                    section("Default Indentation", caption: "Used for new documents and text whose indentation can't be detected. Change a document's own indentation from the bottom bar.") {
+                        HStack {
+                            Text("Indent Width")
+                            Spacer()
+                            Picker("", selection: $tabSize) {
+                                Text("2").tag(2)
+                                Text("4").tag(4)
+                            }
+                            .pickerStyle(.segmented)
+                            .labelsHidden()
+                            .frame(width: 140)
+                        }
+                        
+                        Divider()
+                        
+                        HStack {
+                            Text("Indent With Tabs")
+                            Spacer()
+                            Toggle("", isOn: $useTabs)
+                                .labelsHidden()
+                        }
                     }
                 }
             }
-            .padding()
-            .frame(maxWidth: .infinity)
-            .background(Color(nsColor: .controlBackgroundColor))
-            .cornerRadius(8)
             
             HStack {
                 Spacer()
@@ -565,8 +545,29 @@ struct SettingsView: View {
             }
         }
         .padding()
-        .frame(width: 350)
+        .frame(width: 720)
         .tint(AppTheme.tealSUI)
+    }
+    
+    /// A titled card of rows, with an optional caption under it.
+    private func section<Content: View>(_ title: String, caption: String? = nil, @ViewBuilder content: () -> Content) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text(title)
+                .font(.headline)
+            VStack(spacing: 12) {
+                content()
+            }
+            .padding()
+            .frame(maxWidth: .infinity)
+            .background(Color(nsColor: .controlBackgroundColor))
+            .cornerRadius(8)
+            if let caption {
+                Text(caption)
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
     }
     
     private func themePicker(_ selection: Binding<String>) -> some View {

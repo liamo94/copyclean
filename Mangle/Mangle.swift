@@ -483,11 +483,17 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMenuDele
             window.setContentSize(settingsContentSize(on: screen))
             window.contentView = NSHostingView(rootView: ScrollView { SettingsView() })
             centerWindow(window, on: screen)
-            window.makeKeyAndOrderFront(nil)
-            NSApp.activate(ignoringOtherApps: true)
+            bringSettingsForward(window)
         } else {
             createSettingsWindow()
         }
+    }
+    
+    /// Activates Mangle before ordering front: `NSApp.activate(ignoringOtherApps:)` has no
+    /// effect on macOS 14+, which left a reopened Settings behind the frontmost app.
+    private func bringSettingsForward(_ window: NSWindow) {
+        NSRunningApplication.current.activate(options: [.activateAllWindows, .activateIgnoringOtherApps])
+        window.makeKeyAndOrderFront(nil)
     }
     
     /// Fits the Settings content, but leaves it to scroll rather than run off a short screen.
@@ -509,10 +515,12 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMenuDele
         window.title = "Mangle Settings"
         window.contentView = NSHostingView(rootView: ScrollView { SettingsView() })
         window.isReleasedWhenClosed = false
+        // Like the editor: open on the current Space (or over a full-screen app), not the
+        // Space Settings was last shown on.
+        window.collectionBehavior = [.moveToActiveSpace, .fullScreenAuxiliary]
         
         self.settingsWindow = window
-        window.makeKeyAndOrderFront(nil)
-        NSApp.activate(ignoringOtherApps: true)
+        bringSettingsForward(window)
     }
     
     func registerGlobalHotkey() {
