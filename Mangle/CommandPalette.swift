@@ -226,7 +226,9 @@ struct CommandPaletteView: View {
         .overlay(RoundedRectangle(cornerRadius: 10).stroke(Color.secondary.opacity(0.25)))
         .shadow(color: .black.opacity(0.25), radius: 16, y: 6)
         .onAppear {
-            focused = true
+            // On the next pass: the field may not be in the window yet, and focus left with the
+            // text view sends the first keystroke to the document (which closes the palette).
+            DispatchQueue.main.async { focused = true }
             lastMouseLocation = NSEvent.mouseLocation
         }
     }
