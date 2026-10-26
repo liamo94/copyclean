@@ -110,6 +110,19 @@ class LineNumberRulerView: NSRulerView {
         needsDisplay = true
     }
     
+    override func draw(_ dirtyRect: NSRect) {
+        super.draw(dirtyRect)
+        // Dim the gutter beside the lines a spotlight leaves out, as the editor does.
+        guard let textView = clientView as? MangleTextView, let lit = textView.spotlightSpan() else { return }
+        let offset = textView.visibleRect.origin.y
+        textView.backgroundColor.withAlphaComponent(MangleTextView.spotlightDimming).setFill()
+        for dim in [NSRect(x: 0, y: bounds.minY, width: bounds.width, height: lit.top - offset - bounds.minY),
+                    NSRect(x: 0, y: lit.bottom - offset, width: bounds.width, height: bounds.maxY - (lit.bottom - offset))] {
+            let rect = dim.intersection(dirtyRect)
+            if !rect.isEmpty { rect.fill(using: .sourceOver) }
+        }
+    }
+    
     override func drawHashMarksAndLabels(in rect: NSRect) {
         guard let textView = clientView as? MangleTextView,
               let layoutManager = textView.layoutManager,
@@ -303,6 +316,7 @@ struct EditorView: View {
     var onClose: () -> Void
     var onNewScratch: () -> Void = {}
     var onTogglePresentation: () -> Void = {}
+    var onTogglePresentationFullScreen: () -> Void = {}
     @Environment(\.colorScheme) private var colorScheme
     @State private var keyMonitor: Any?
     @State private var textView: NSTextView?
@@ -347,7 +361,7 @@ struct EditorView: View {
 
 
     @State private var needsAccessibility = !AXIsProcessTrusted()
-    /// "Presenting · ⌥⌘P to exit", shown briefly on entering presentation mode.
+    /// The "Presenting" hint, shown briefly on entering presentation mode.
     @State private var showPresentingHint = false
     
     private static let languages: [(label: String, id: String)] = [
@@ -401,6 +415,7 @@ struct EditorView: View {
                 themeName: settings.themeName(isDark: colorScheme == .dark, presenting: viewModel.isPresenting),
                 status: viewModel.status,
                 isPresenting: viewModel.isPresenting,
+                showsLineNumbers: !viewModel.isPresenting || settings.presentationLineNumbers,
                 onTextViewReady: { tv in
                     textView = tv
                     viewModel.textView = tv
@@ -420,7 +435,7 @@ struct EditorView: View {
         }
         .overlay(alignment: .bottomTrailing) {
             if showPresentingHint {
-                Text("Presenting · ⌥⌘P or Esc to exit")
+                Text("Presenting · Select lines to spotlight, ← → to step · Esc to exit")
                     .font(.system(size: 12, weight: .medium))
                     .foregroundColor(.secondary)
                     .padding(.horizontal, 10)
@@ -500,6 +515,9 @@ struct EditorView: View {
                 // only hidden (never closed), so without this check its shortcuts fired in
                 // History/Settings and edited the hidden document.
                 guard let editorWindow = textView?.window, event.window === editorWindow else { return event }
+                // Shortcuts handled here (⌘Z, ⌘/…) never reach the text view's keyDown, so
+                // wake its caret for them too.
+                if editorWindow.firstResponder === textView { (textView as? MangleTextView)?.noteInteraction() }
                 let mods = event.modifierFlags.intersection([.command, .shift, .option, .control])
                 
                 // If focus went somewhere else (the document after a click, or the find bar),
@@ -571,7 +589,11 @@ struct EditorView: View {
                     closeFindBar()
                     return nil
                 }
-                // Then it leaves presentation mode, like leaving full screen.
+                // Then it drops a spotlight, then leaves presentation mode, like leaving full screen.
+                if event.keyCode == 53, let mtv = textView as? MangleTextView, mtv.spotlightRange != nil {
+                    mtv.clearSpotlight()
+                    return nil
+                }
                 if event.keyCode == 53, viewModel.isPresenting {
                     onTogglePresentation()
                     return nil
@@ -595,6 +617,7 @@ struct EditorView: View {
                 if mods == .command, key == "w" { cancelEditor(); return nil }
                 if mods == .command, key == "t" { showTransformMenu(); return nil }
                 if mods == [.command, .option], key == "p" { onTogglePresentation(); return nil }
+                if mods == [.command, .control], key == "f", viewModel.isPresenting { onTogglePresentationFullScreen(); return nil }
                 
                 if !editingFieldFocused {
                     if mods == .command, key == "e" { useSelectionForFind(); return nil }
@@ -1602,6 +1625,7 @@ struct EditorView: View {
             EditorCommand(title: "Zoom Out", section: "View", shortcut: "⌘−") { zoom(by: -1) },
             EditorCommand(title: "Reset Zoom", section: "View", shortcut: "⌘0", run: resetZoom),
         ]
+        commands += presentationCommands
         // "Indent Using" only changes what Tab inserts; "Convert" also re-indents the text.
         let indentations: [(label: String, value: Indentation)] = [("Spaces (2)", .spaces(2)), ("Spaces (4)", .spaces(4)), ("Tabs", .tabs)]
         commands += indentations.map { option in
@@ -1703,6 +1727,77 @@ struct EditorView: View {
             t("Convert to CR", "Line Endings", scope: .document, TextTransforms.toCR),
         ]))
         return sections
+    }
+    
+    /// Presentation mode's commands. The two preferences work any time; the rest need a
+    /// presentation in progress.
+    private var presentationCommands: [EditorCommand] {
+        let presenting = viewModel.isPresenting
+        let notPresenting = presenting ? nil : "Only while presenting"
+        let mtv = textView as? MangleTextView
+        let isFullScreen = textView?.window?.styleMask.contains(.fullScreen) == true
+        return [
+            EditorCommand(title: "Spotlight Next Line", section: "Presentation", shortcut: "→", isEnabled: presenting,
+                          detail: notPresenting) { mtv?.spotlightStep(forward: true) },
+            EditorCommand(title: "Spotlight Previous Line", section: "Presentation", shortcut: "←", isEnabled: presenting,
+                          detail: notPresenting) { mtv?.spotlightStep(forward: false) },
+            EditorCommand(title: "Fit Text to Window", section: "Presentation", isEnabled: presenting,
+                          detail: notPresenting, run: fitToWindow),
+            EditorCommand(title: isFullScreen ? "Exit Full Screen" : "Enter Full Screen", section: "Presentation", shortcut: "⌃⌘F",
+                          isEnabled: presenting, detail: notPresenting, key: "Presentation/Full Screen",
+                          run: onTogglePresentationFullScreen),
+            EditorCommand(title: settings.presentationHighContrast ? "Turn Off High Contrast Presentation" : "Turn On High Contrast Presentation",
+                          section: "Presentation", key: "View/High Contrast Presentation") { settings.presentationHighContrast.toggle() },
+            EditorCommand(title: settings.presentationLineNumbers ? "Hide Line Numbers When Presenting" : "Show Line Numbers When Presenting",
+                          section: "Presentation", key: "Presentation/Line Numbers") { settings.presentationLineNumbers.toggle() },
+        ]
+    }
+    
+    /// Sets the presentation size so the spotlighted lines (or the whole document) fill the
+    /// window without scrolling or wrapping, then scrolls them into place.
+    private func fitToWindow() {
+        guard viewModel.isPresenting, let tv = textView, let scrollView = tv.enclosingScrollView else { return }
+        let text = tv.string as NSString
+        guard text.length > 0 else { return }
+        let range = (tv as? MangleTextView)?.spotlightRange ?? NSRange(location: 0, length: text.length)
+        var lines = text.substring(with: range).components(separatedBy: "\n")
+        if lines.count > 1, lines.last?.isEmpty == true { lines.removeLast() }
+        let tab = String(repeating: " ", count: (tv as? MangleTextView)?.indentWidth ?? 4)
+        let longest = lines.map { $0.replacingOccurrences(of: "\t", with: tab) }.max { $0.count < $1.count } ?? ""
+        
+        // Text scales linearly with the font size, so measure once at a reference size.
+        let reference: CGFloat = 100
+        let font = settings.editorFont.nsFont(size: reference)
+        let width = (longest as NSString).size(withAttributes: [.font: font]).width
+        let height = NSLayoutManager().defaultLineHeight(for: font) * CGFloat(lines.count)
+        let inset = tv.textContainerInset
+        let padding = (tv.textContainer?.lineFragmentPadding ?? 0) * 2
+        // The clip view spans the gutter too.
+        let gutter = scrollView.verticalRulerView?.ruleThickness ?? 0
+        let available = NSSize(width: scrollView.contentView.frame.width - gutter - inset.width * 2 - padding - 4,
+                               height: scrollView.contentView.frame.height - inset.height * 2)
+        guard width > 0, height > 0, available.width > 0, available.height > 0 else { return }
+        let fitted = (min(available.width / width, available.height / height) * reference).rounded(.down)
+        let bounds = SettingsManager.presentationFontSizeRange
+        let size = min(max(fitted, bounds.lowerBound), bounds.upperBound)
+        settings.presentationFontSize = size
+        scrollToTop(of: range, in: tv, onceSized: size, until: Date().addingTimeInterval(2))
+    }
+    
+    /// Puts the first line of `range` at the top of the window. The new font size reaches
+    /// the text through a background re-highlight, so this waits (briefly) until it has —
+    /// scrolling before then would measure the old layout.
+    private func scrollToTop(of range: NSRange, in tv: NSTextView, onceSized size: CGFloat, until deadline: Date) {
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
+            guard let storage = tv.textStorage, let lm = tv.layoutManager, range.location < storage.length else { return }
+            let font = storage.attribute(.font, at: range.location, effectiveRange: nil) as? NSFont
+            if font?.pointSize != size, Date() < deadline {
+                scrollToTop(of: range, in: tv, onceSized: size, until: deadline)
+                return
+            }
+            let line = lm.lineFragmentRect(forGlyphAt: lm.glyphIndexForCharacter(at: range.location), effectiveRange: nil)
+            tv.scroll(NSPoint(x: 0, y: max(line.minY + tv.textContainerOrigin.y - tv.textContainerInset.height, 0)))
+        }
     }
     
     /// Zooms the editor, or the presentation size while presenting.
@@ -2035,6 +2130,13 @@ final class MangleTextView: NSTextView {
     // MARK: Key interception (most reliable — fires before interpretKeyEvents)
     
     override func keyDown(with event: NSEvent) {
+        noteInteraction()
+        // While a spotlight is up, ← / → step it a line at a time instead of collapsing it.
+        if spotlightRange != nil, event.modifierFlags.intersection([.command, .option, .control, .shift]).isEmpty,
+           event.keyCode == 123 || event.keyCode == 124 {
+            spotlightStep(forward: event.keyCode == 124)
+            return
+        }
         let opt   = event.modifierFlags.contains(.option)
         let shift = event.modifierFlags.contains(.shift)
         let cmd   = event.modifierFlags.contains(.command)
@@ -2121,7 +2223,13 @@ final class MangleTextView: NSTextView {
     
     override func setSelectedRanges(_ ranges: [NSValue], affinity: NSSelectionAffinity, stillSelecting: Bool) {
         let oldLineRect = currentLineRect()
+        let oldSpotlight = spotlightRange
         super.setSelectedRanges(ranges, affinity: affinity, stillSelecting: stillSelecting)
+        if isPresenting, spotlightRange != oldSpotlight {
+            updateSelectionStyle()
+            needsDisplay = true
+            enclosingScrollView?.verticalRulerView?.needsDisplay = true
+        }
         if !isUpdatingMultiSelection && !extraCarets.isEmpty {
             extraCarets = []
             needsDisplay = true
@@ -2229,7 +2337,7 @@ final class MangleTextView: NSTextView {
     // MARK: Current line highlight
     
     func currentLineRect() -> NSRect? {
-        guard layoutManager != nil, !hasMultipleSelections, selectedRange().length == 0,
+        guard layoutManager != nil, !hidesCaret, !hasMultipleSelections, selectedRange().length == 0,
               let caret = caretRect(at: selectedRange().location) else { return nil }
         return NSRect(x: 0, y: caret.minY, width: bounds.width, height: caret.height)
     }
@@ -2421,6 +2529,7 @@ final class MangleTextView: NSTextView {
     }
     
     override func mouseDown(with event: NSEvent) {
+        noteInteraction()
         // Clicking a fold's ⋯ opens it.
         if let f = fold(withPlaceholderAt: convert(event.locationInWindow, from: nil)) {
             unfold(f)
@@ -2442,6 +2551,126 @@ final class MangleTextView: NSTextView {
                 if let rect = caretRect(at: location), rect.intersects(dirtyRect) { rect.fill() }
             }
         }
+        drawSpotlight(in: dirtyRect)
+    }
+    
+    // MARK: Presentation
+    //
+    // Selecting lines spotlights them (everything else dims), ← / → step the spotlight
+    // through the lines, and the caret and current-line band stay hidden until you type.
+    
+    var isPresenting = false {
+        didSet {
+            guard isPresenting != oldValue else { return }
+            lastInteraction = .distantPast
+            updateSelectionStyle()
+            updateCaretVisibility()
+        }
+    }
+    
+    /// The theme's caret colour; `insertionPointColor` follows it unless the caret is hidden.
+    var caretColor: NSColor = .textColor { didSet { updateCaretVisibility() } }
+    private var lastInteraction = Date.distantPast
+    private var quietWork: DispatchWorkItem?
+    private static let quietDelay: TimeInterval = 1.5
+    private var normalSelectedTextAttributes: [NSAttributedString.Key: Any]?
+    
+    /// While presenting, the caret shows only for a moment after typing or clicking, so a
+    /// still screen has nothing blinking on it.
+    var hidesCaret: Bool { isPresenting && Date().timeIntervalSince(lastInteraction) >= Self.quietDelay }
+    
+    /// The whole lines the selection covers, while presenting.
+    var spotlightRange: NSRange? {
+        guard isPresenting, !hasMultipleSelections else { return nil }
+        let selection = selectedRange()
+        guard selection.length > 0, NSMaxRange(selection) <= (string as NSString).length else { return nil }
+        return (string as NSString).lineRange(for: selection)
+    }
+    
+    /// Shows the caret for a moment (it hides again when idle while presenting).
+    func noteInteraction() {
+        guard isPresenting else { return }
+        let wasHidden = hidesCaret
+        lastInteraction = Date()
+        if wasHidden { updateCaretVisibility() }
+        quietWork?.cancel()
+        let work = DispatchWorkItem { [weak self] in self?.updateCaretVisibility() }
+        quietWork = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + Self.quietDelay + 0.05, execute: work)
+    }
+    
+    private func updateCaretVisibility() {
+        // The background colour rather than clear, which can punch through the view.
+        insertionPointColor = hidesCaret ? backgroundColor : caretColor
+        needsDisplay = true   // the current-line band
+        enclosingScrollView?.verticalRulerView?.needsDisplay = true
+    }
+    
+    /// The spotlight stands in for the selection highlight while it's up.
+    private func updateSelectionStyle() {
+        if normalSelectedTextAttributes == nil { normalSelectedTextAttributes = selectedTextAttributes }
+        if spotlightRange != nil {
+            selectedTextAttributes = [.backgroundColor: NSColor.clear]
+        } else if let normal = normalSelectedTextAttributes {
+            selectedTextAttributes = normal
+        }
+    }
+    
+    static let spotlightDimming: CGFloat = 0.75
+    
+    /// The spotlight's top and bottom edges in this view's coordinates.
+    func spotlightSpan() -> (top: CGFloat, bottom: CGFloat)? {
+        guard let spotlight = spotlightRange, let lm = layoutManager, spotlight.length > 0 else { return nil }
+        let glyphs = lm.glyphRange(forCharacterRange: spotlight, actualCharacterRange: nil)
+        guard glyphs.length > 0 else { return nil }
+        let first = lm.lineFragmentRect(forGlyphAt: glyphs.location, effectiveRange: nil)
+        let last = lm.lineFragmentRect(forGlyphAt: NSMaxRange(glyphs) - 1, effectiveRange: nil)
+        return (first.minY + textContainerOrigin.y, last.maxY + textContainerOrigin.y)
+    }
+    
+    /// Drops the spotlight, leaving the caret where the spotlight started.
+    func clearSpotlight() {
+        guard let spotlight = spotlightRange else { return }
+        setSelectedRange(NSRange(location: spotlight.location, length: 0))
+    }
+    
+    private func drawSpotlight(in dirtyRect: NSRect) {
+        guard let (top, bottom) = spotlightSpan() else { return }
+        backgroundColor.withAlphaComponent(Self.spotlightDimming).setFill()
+        for dim in [NSRect(x: bounds.minX, y: bounds.minY, width: bounds.width, height: top - bounds.minY),
+                    NSRect(x: bounds.minX, y: bottom, width: bounds.width, height: bounds.maxY - bottom)] {
+            let rect = dim.intersection(dirtyRect)
+            if !rect.isEmpty { rect.fill(using: .sourceOver) }
+        }
+    }
+    
+    /// Spotlights the next or previous line, skipping blank ones. With no spotlight yet,
+    /// starts from the line at the caret. (A bigger spotlight is a drag away.)
+    func spotlightStep(forward: Bool) {
+        let text = string as NSString
+        var steps: [NSRange] = []
+        var location = 0
+        while location < text.length {
+            var lineEnd = 0, contentsEnd = 0
+            text.getLineStart(nil, end: &lineEnd, contentsEnd: &contentsEnd, for: NSRange(location: location, length: 0))
+            let contents = NSRange(location: location, length: contentsEnd - location)
+            if text.rangeOfCharacter(from: CharacterSet.whitespaces.inverted, options: [], range: contents).location != NSNotFound {
+                steps.append(contents)
+            }
+            location = lineEnd
+        }
+        
+        let caret = selectedRange().location
+        let target: NSRange?
+        switch (forward, spotlightRange) {
+        case (true, let current?): target = steps.first { $0.location >= NSMaxRange(current) }
+        case (true, nil): target = steps.first { NSMaxRange($0) >= caret }
+        case (false, let current?): target = steps.last { NSMaxRange($0) <= current.location }
+        case (false, nil): target = steps.last { $0.location <= caret }
+        }
+        guard let target else { return }
+        setSelectedRange(target)
+        scrollRangeToVisible(target)
     }
     
     override func viewDidChangeEffectiveAppearance() {
@@ -2699,8 +2928,10 @@ struct CustomTextEditor: NSViewRepresentable {
     var isDark: Bool
     var themeName: String
     var status: EditorStatus
-    /// Presentation mode: no line numbers (fold chevrons stay) and roomier margins.
+    /// Presentation mode: roomier margins, spotlighting, and a caret that hides when idle.
     var isPresenting = false
+    /// Off while presenting unless asked for (fold chevrons stay either way).
+    var showsLineNumbers = true
     var onTextViewReady: ((NSTextView) -> Void)?
     /// Called with the generation once its text is in the text view.
     var onLoadApplied: ((Int) -> Void)?
@@ -2775,7 +3006,8 @@ struct CustomTextEditor: NSViewRepresentable {
         let rulerView = LineNumberRulerView(scrollView: scrollView, orientation: .verticalRuler)
         rulerView.clientView = textView
         rulerView.fontSize = fontSize
-        rulerView.showsLineNumbers = !isPresenting
+        rulerView.showsLineNumbers = showsLineNumbers
+        textView.isPresenting = isPresenting
         scrollView.verticalRulerView = rulerView
         scrollView.hasVerticalRuler = true
         scrollView.rulersVisible = true
@@ -2820,11 +3052,16 @@ struct CustomTextEditor: NSViewRepresentable {
             textView.foldSkipsStrings = Coordinator.pairsQuotes(language)
         }
         
-        if coordinator.rulerView?.showsLineNumbers == isPresenting {
-            coordinator.rulerView?.showsLineNumbers = !isPresenting
-            textView.textContainerInset = Coordinator.textInset(presenting: isPresenting)
+        if coordinator.rulerView?.showsLineNumbers != showsLineNumbers {
+            coordinator.rulerView?.showsLineNumbers = showsLineNumbers
             coordinator.rulerView?.needsDisplay = true
         }
+        let inset = Coordinator.textInset(presenting: isPresenting)
+        if textView.textContainerInset != inset {
+            textView.textContainerInset = inset
+            coordinator.rulerView?.needsDisplay = true
+        }
+        textView.isPresenting = isPresenting
         
         let newFont = editorFont.nsFont(size: fontSize)
         let fontChanged = coordinator.rulerView?.fontSize != fontSize
@@ -2949,7 +3186,8 @@ struct CustomTextEditor: NSViewRepresentable {
         func applyThemeColors(to textView: NSTextView, isDark: Bool) {
             let themeBG = highlightr?.theme.themeBackgroundColor
             textView.backgroundColor = themeBG ?? (isDark ? AppTheme.editorDarkBG : .textBackgroundColor)
-            textView.insertionPointColor = isDark ? AppTheme.teal : NSColor(AppTheme.tealSUI)
+            let caret = isDark ? AppTheme.teal : NSColor(AppTheme.tealSUI)
+            if let mtv = textView as? MangleTextView { mtv.caretColor = caret } else { textView.insertionPointColor = caret }
         }
         
         /// Pushes freshly loaded text into the editor: highlights once with the already-detected

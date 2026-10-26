@@ -48,6 +48,9 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMenuDele
     private var lastCopyPress: Date = .distantPast
     /// The editor's frame before presentation mode enlarged it.
     private var frameBeforePresenting: NSRect?
+    /// Runs once the editor has left full screen (see `exitFullScreen(then:)`).
+    private var afterFullScreenExit: (() -> Void)?
+    private static let editorCollectionBehavior: NSWindow.CollectionBehavior = [.moveToActiveSpace, .fullScreenAuxiliary]
     
     func applicationDidFinishLaunching(_ notification: Notification) {
         AppDelegate.shared = self
@@ -353,12 +356,52 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMenuDele
     
     private func endPresentation(animate: Bool) {
         guard editorViewModel.isPresenting else { return }
+        if exitFullScreen(then: { [weak self] in self?.endPresentation(animate: animate) }) { return }
         editorViewModel.isPresenting = false
         editorWindow?.level = .floating
         if let frame = frameBeforePresenting, let window = editorWindow {
             window.setFrame(frame, display: true, animate: animate && window.isVisible)
         }
         frameBeforePresenting = nil
+    }
+    
+    /// While presenting: native full screen, filling the display on its own Space with the
+    /// menu bar and Dock out of the way.
+    func togglePresentationFullScreen() {
+        guard let window = editorWindow, editorViewModel.isPresenting, afterFullScreenExit == nil else { return }
+        // Full screen needs a primary window; the editor is normally auxiliary, so it can
+        // open over other apps' full-screen Spaces.
+        if !window.styleMask.contains(.fullScreen) { window.collectionBehavior = [.fullScreenPrimary] }
+        window.toggleFullScreen(nil)
+    }
+    
+    /// Leaves full screen and runs `then` once the window is back in place. False (and
+    /// `then` isn't run) when the editor isn't full screen. Asked again mid-exit (Esc twice,
+    /// Esc then ⌘W), it queues `then` rather than toggling back into full screen.
+    private func exitFullScreen(then: @escaping () -> Void) -> Bool {
+        if let pending = afterFullScreenExit {
+            afterFullScreenExit = { pending(); then() }
+            return true
+        }
+        guard let window = editorWindow, window.styleMask.contains(.fullScreen) else { return false }
+        afterFullScreenExit = then
+        window.toggleFullScreen(nil)
+        return true
+    }
+    
+    func windowDidExitFullScreen(_ notification: Notification) {
+        guard notification.object as? NSWindow === editorWindow else { return }
+        editorWindow?.collectionBehavior = Self.editorCollectionBehavior
+        let then = afterFullScreenExit
+        afterFullScreenExit = nil
+        then?()
+    }
+    
+    func windowDidFailToExitFullScreen(_ window: NSWindow) {
+        guard window === editorWindow else { return }
+        let then = afterFullScreenExit
+        afterFullScreenExit = nil
+        then?()
     }
     
     @objc func appDidResignActive() {
@@ -483,6 +526,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMenuDele
     }
     
     @objc func showSettings() {
+        if exitFullScreen(then: { [weak self] in self?.showSettings() }) { return }
         closeEditor()
         closeHistory()
         
@@ -625,6 +669,8 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMenuDele
             returnFocusIfIdle()
             return
         }
+        // Out of full screen first: hiding the editor there would leave its empty Space behind.
+        if exitFullScreen(then: { [weak self] in self?.showHistory() }) { return }
         rememberFrontmostApp()
         closeSettings()
         
@@ -936,6 +982,8 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMenuDele
             self?.newScratch()
         }, onTogglePresentation: { [weak self] in
             self?.togglePresentation()
+        }, onTogglePresentationFullScreen: { [weak self] in
+            self?.togglePresentationFullScreen()
         })
         
         let window = NSWindow(
@@ -952,7 +1000,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMenuDele
         window.isReleasedWhenClosed = false
         window.isRestorable = false
         // Full-screen auxiliary so it opens over a full-screen app instead of switching Spaces.
-        window.collectionBehavior = [.moveToActiveSpace, .fullScreenAuxiliary]
+        window.collectionBehavior = Self.editorCollectionBehavior
         window.delegate = self
         titleObserver = editorViewModel.$isScratch.combineLatest(editorViewModel.$origin)
             .sink { [weak window] isScratch, origin in
@@ -966,6 +1014,8 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMenuDele
     
     /// Copies, closes, then switches back to the app the text came from and pastes it there.
     func saveAndPaste() {
+        // Paste only once the editor is out of full screen and hidden, or ⌘V lands mid-transition.
+        if exitFullScreen(then: { [weak self] in self?.saveAndPaste() }) { return }
         saveToClipboard(toast: nil)
         pasteIntoPreviousApp()
     }
@@ -1160,6 +1210,11 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMenuDele
     }
     
     func closeEditor() {
+        // Hiding a full-screen window would leave its empty Space behind.
+        if exitFullScreen(then: { [weak self] in
+            self?.closeEditor()
+            self?.returnFocusIfIdle()
+        }) { return }
         endPresentation(animate: false)
         let anchor = editorWindow?.isVisible == true ? editorWindow?.frame : nil
         editorWindow?.orderOut(nil)

@@ -84,6 +84,12 @@ class SettingsManager: ObservableObject {
             UserDefaults.standard.set(presentationHighContrast, forKey: presentationHighContrastKey)
         }
     }
+    /// Line numbers stay visible while presenting (off by default, for a cleaner slide).
+    @Published var presentationLineNumbers: Bool {
+        didSet {
+            UserDefaults.standard.set(presentationLineNumbers, forKey: presentationLineNumbersKey)
+        }
+    }
     @Published var pauseHistory: Bool {
         didSet {
             UserDefaults.standard.set(pauseHistory, forKey: pauseHistoryKey)
@@ -152,6 +158,7 @@ class SettingsManager: ObservableObject {
     private let scratchKey = "ScratchShortcut"
     private let presentationFontSizeKey = "PresentationFontSize"
     private let presentationHighContrastKey = "PresentationHighContrast"
+    private let presentationLineNumbersKey = "PresentationLineNumbers"
     private let pauseHistoryKey = "PauseHistory"
     private let fontSizeKey = "EditorFontSize"
     private let maxHistoryKey = "MaxHistory"
@@ -199,6 +206,7 @@ class SettingsManager: ObservableObject {
         let storedPresentationSize = UserDefaults.standard.double(forKey: presentationFontSizeKey)
         presentationFontSize = storedPresentationSize > 0 ? CGFloat(storedPresentationSize) : Self.defaultPresentationFontSize
         presentationHighContrast = UserDefaults.standard.object(forKey: presentationHighContrastKey) as? Bool ?? true
+        presentationLineNumbers = UserDefaults.standard.bool(forKey: presentationLineNumbersKey)
         
         let storedMax = UserDefaults.standard.integer(forKey: "MaxHistory")
         maxHistory = storedMax > 0 ? storedMax : 100
@@ -337,6 +345,7 @@ struct SettingsView: View {
     @State private var darkTheme: String
     @State private var lightTheme: String
     @State private var presentationHighContrast: Bool
+    @State private var presentationLineNumbers: Bool
     
     init() {
         let settings = SettingsManager.shared
@@ -352,6 +361,7 @@ struct SettingsView: View {
         _darkTheme = State(initialValue: settings.darkTheme)
         _lightTheme = State(initialValue: settings.lightTheme)
         _presentationHighContrast = State(initialValue: settings.presentationHighContrast)
+        _presentationLineNumbers = State(initialValue: settings.presentationLineNumbers)
     }
     
     var body: some View {
@@ -487,6 +497,16 @@ struct SettingsView: View {
                                 .labelsHidden()
                         }
                         .help("Presentation mode (⌥⌘P) switches to an accessible high-contrast theme")
+                        
+                        Divider()
+                        
+                        HStack {
+                            Text("Line Numbers When Presenting")
+                            Spacer()
+                            Toggle("", isOn: $presentationLineNumbers)
+                                .labelsHidden()
+                        }
+                        .help("Keep line numbers in presentation mode (⌥⌘P), so the audience can refer to them")
                     }
                     
                     section("Default Indentation", caption: "Used for new documents and text whose indentation can't be detected. Change a document's own indentation from the bottom bar.") {
@@ -535,6 +555,7 @@ struct SettingsView: View {
                     settings.darkTheme = darkTheme
                     settings.lightTheme = lightTheme
                     settings.presentationHighContrast = presentationHighContrast
+                    settings.presentationLineNumbers = presentationLineNumbers
                     settings.save()
                     // Apply a lowered limit now rather than on the next copy.
                     AppDelegate.shared?.historyManager.enforceLimit(save: true)
