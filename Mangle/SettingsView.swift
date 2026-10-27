@@ -61,6 +61,23 @@ struct KeyboardShortcut: Codable, Equatable {
     }
 }
 
+/// Whether the app follows the system's light/dark setting or forces one.
+enum AppAppearance: String, CaseIterable, Identifiable {
+    case system = "System"
+    case light = "Light"
+    case dark = "Dark"
+
+    var id: String { rawValue }
+
+    var nsAppearance: NSAppearance? {
+        switch self {
+        case .system: return nil
+        case .light: return NSAppearance(named: .aqua)
+        case .dark: return NSAppearance(named: .darkAqua)
+        }
+    }
+}
+
 class SettingsManager: ObservableObject {
     static let shared = SettingsManager()
     
@@ -127,6 +144,12 @@ class SettingsManager: ObservableObject {
             UserDefaults.standard.set(doubleCopyOpensEditor, forKey: doubleCopyKey)
         }
     }
+    @Published var appearance: AppAppearance {
+        didSet {
+            UserDefaults.standard.set(appearance.rawValue, forKey: appearanceKey)
+            applyAppearance()
+        }
+    }
     @Published var darkTheme: String {
         didSet {
             UserDefaults.standard.set(darkTheme, forKey: darkThemeKey)
@@ -151,6 +174,11 @@ class SettingsManager: ObservableObject {
         return isDark ? darkTheme : lightTheme
     }
 
+    /// Every window, and so every syntax theme, follows the app's appearance.
+    func applyAppearance() {
+        NSApp.appearance = appearance.nsAppearance
+    }
+
     var onShortcutsChanged: (() -> Void)?
 
     private let editorKey = "EditorShortcut"
@@ -167,6 +195,7 @@ class SettingsManager: ObservableObject {
     private let editorFontKey = "EditorFontName"
     private let useTabsKey = "UseTabs"
     private let doubleCopyKey = "DoubleCopyOpensEditor"
+    private let appearanceKey = "Appearance"
     private let darkThemeKey = "DarkTheme"
     private let lightThemeKey = "LightTheme"
 
@@ -221,6 +250,7 @@ class SettingsManager: ObservableObject {
         
         useTabs = UserDefaults.standard.bool(forKey: "UseTabs")
         doubleCopyOpensEditor = UserDefaults.standard.object(forKey: "DoubleCopyOpensEditor") as? Bool ?? true
+        appearance = UserDefaults.standard.string(forKey: appearanceKey).flatMap(AppAppearance.init(rawValue:)) ?? .system
         darkTheme = UserDefaults.standard.string(forKey: "DarkTheme") ?? Self.defaultDarkTheme
         lightTheme = UserDefaults.standard.string(forKey: "LightTheme") ?? Self.defaultLightTheme
     }
@@ -330,6 +360,9 @@ enum ThemeCatalog {
 
 struct SettingsView: View {
     @ObservedObject var settings = SettingsManager.shared
+    // Pop-up buttons keep the title color they were drawn with when the appearance flips,
+    // leaving dark text on a dark button, so they're rebuilt per color scheme.
+    @Environment(\.colorScheme) private var colorScheme
     
     @State private var editorShortcut: KeyboardShortcut
     @State private var historyShortcut: KeyboardShortcut
@@ -342,6 +375,7 @@ struct SettingsView: View {
     @State private var editorFont: EditorFont
     @State private var useTabs: Bool
     @State private var doubleCopyOpensEditor: Bool
+    @State private var appearance: AppAppearance
     @State private var darkTheme: String
     @State private var lightTheme: String
     @State private var presentationHighContrast: Bool
@@ -358,6 +392,7 @@ struct SettingsView: View {
         _editorFont = State(initialValue: settings.editorFont)
         _useTabs = State(initialValue: settings.useTabs)
         _doubleCopyOpensEditor = State(initialValue: settings.doubleCopyOpensEditor)
+        _appearance = State(initialValue: settings.appearance)
         _darkTheme = State(initialValue: settings.darkTheme)
         _lightTheme = State(initialValue: settings.lightTheme)
         _presentationHighContrast = State(initialValue: settings.presentationHighContrast)
@@ -470,6 +505,18 @@ struct SettingsView: View {
                             }
                             .labelsHidden()
                             .frame(width: 160)
+                            .id(colorScheme)
+                        }
+                        
+                        Divider()
+                        
+                        HStack {
+                            Text("Appearance")
+                            Spacer()
+                            TealSegmentedPicker(selection: $appearance, options: AppAppearance.allCases.map { ($0, $0.rawValue) })
+                                .frame(width: 200)
+                            // Previewed straight away; Save keeps it, and Cancel or closing reverts.
+                            .onChange(of: appearance) { NSApp.appearance = appearance.nsAppearance }
                         }
                         
                         Divider()
@@ -513,13 +560,8 @@ struct SettingsView: View {
                         HStack {
                             Text("Indent Width")
                             Spacer()
-                            Picker("", selection: $tabSize) {
-                                Text("2").tag(2)
-                                Text("4").tag(4)
-                            }
-                            .pickerStyle(.segmented)
-                            .labelsHidden()
-                            .frame(width: 140)
+                            TealSegmentedPicker(selection: $tabSize, options: [(2, "2"), (4, "4")])
+                                .frame(width: 140)
                         }
                         
                         Divider()
@@ -552,6 +594,7 @@ struct SettingsView: View {
                     settings.editorFont = editorFont
                     settings.useTabs = useTabs
                     settings.doubleCopyOpensEditor = doubleCopyOpensEditor
+                    settings.appearance = appearance
                     settings.darkTheme = darkTheme
                     settings.lightTheme = lightTheme
                     settings.presentationHighContrast = presentationHighContrast
@@ -562,12 +605,13 @@ struct SettingsView: View {
                     NSApp.keyWindow?.close()
                 }
                 .keyboardShortcut(.defaultAction)
-                .buttonStyle(.borderedProminent)
+                .buttonStyle(TealProminentButtonStyle())
             }
         }
         .padding()
         .frame(width: 720)
         .tint(AppTheme.tealSUI)
+        .toggleStyle(TealCheckboxStyle())
     }
     
     /// A titled card of rows, with an optional caption under it.
@@ -599,5 +643,77 @@ struct SettingsView: View {
         }
         .labelsHidden()
         .frame(width: 180)
+        .id(colorScheme)
+    }
+}
+
+// MARK: - Teal Controls
+// The system draws white text and checkmarks on a tinted fill, which only reaches ~2:1
+// contrast on teal, so the teal controls here draw their own with `AppTheme.onTeal`.
+
+/// A segmented control whose selected segment is teal with dark text.
+struct TealSegmentedPicker<Value: Hashable>: View {
+    @Binding var selection: Value
+    let options: [(value: Value, label: String)]
+
+    var body: some View {
+        HStack(spacing: 2) {
+            ForEach(options, id: \.value) { option in
+                let selected = option.value == selection
+                Button {
+                    selection = option.value
+                } label: {
+                    Text(option.label)
+                        .foregroundColor(selected ? AppTheme.onTealSUI : .primary)
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 3)
+                        .background(selected ? AppTheme.tealSUI : Color.clear, in: RoundedRectangle(cornerRadius: 5))
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .accessibilityAddTraits(selected ? .isSelected : [])
+            }
+        }
+        .padding(2)
+        .background(Color.primary.opacity(0.08), in: RoundedRectangle(cornerRadius: 7))
+    }
+}
+
+/// A checkbox that fills teal with a dark checkmark when on.
+struct TealCheckboxStyle: ToggleStyle {
+    func makeBody(configuration: Configuration) -> some View {
+        Button {
+            configuration.isOn.toggle()
+        } label: {
+            HStack(spacing: 6) {
+                ZStack {
+                    RoundedRectangle(cornerRadius: 4)
+                        .fill(configuration.isOn ? AppTheme.tealSUI : Color.primary.opacity(0.1))
+                    RoundedRectangle(cornerRadius: 4)
+                        .strokeBorder(Color.primary.opacity(configuration.isOn ? 0 : 0.2), lineWidth: 0.5)
+                    if configuration.isOn {
+                        Image(systemName: "checkmark")
+                            .font(.system(size: 10, weight: .bold))
+                            .foregroundColor(AppTheme.onTealSUI)
+                    }
+                }
+                .frame(width: 16, height: 16)
+                configuration.label
+            }
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .accessibilityValue(configuration.isOn ? "On" : "Off")
+    }
+}
+
+/// The default-action button: teal with dark text.
+struct TealProminentButtonStyle: ButtonStyle {
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .foregroundColor(AppTheme.onTealSUI)
+            .padding(.horizontal, 12)
+            .padding(.vertical, 4)
+            .background(AppTheme.tealSUI.opacity(configuration.isPressed ? 0.8 : 1), in: RoundedRectangle(cornerRadius: 6))
     }
 }

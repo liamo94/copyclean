@@ -12,6 +12,13 @@ struct MangleApp: App {
         Settings {
             EmptyView()
         }
+        .commands {
+            // ⌘, would otherwise open this empty placeholder scene, behind the floating editor.
+            CommandGroup(replacing: .appSettings) {
+                Button("Settings…") { appDelegate.showSettings() }
+                    .keyboardShortcut(",")
+            }
+        }
     }
 }
 
@@ -57,6 +64,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMenuDele
     
     func applicationDidFinishLaunching(_ notification: Notification) {
         AppDelegate.shared = self
+        SettingsManager.shared.applyAppearance()
 
         // Two copies (say an Xcode build and the installed app) both receive the global
         // hotkeys, so each would open its own editor. The newest launch takes over — but only
@@ -579,6 +587,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMenuDele
             let screen = screenAtCursor()
             window.setContentSize(settingsContentSize(on: screen))
             window.contentView = NSHostingView(rootView: ScrollView { SettingsView() })
+            SettingsManager.shared.applyAppearance()
             centerWindow(window, on: screen)
             bringSettingsForward(window)
         } else {
@@ -615,6 +624,10 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMenuDele
         // Like the editor: open on the current Space (or over a full-screen app), not the
         // Space Settings was last shown on.
         window.collectionBehavior = [.moveToActiveSpace, .fullScreenAuxiliary]
+        // Settings previews the appearance before Save; closing any other way drops the preview.
+        NotificationCenter.default.addObserver(forName: NSWindow.willCloseNotification, object: window, queue: .main) { _ in
+            SettingsManager.shared.applyAppearance()
+        }
         
         self.settingsWindow = window
         bringSettingsForward(window)

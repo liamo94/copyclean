@@ -806,7 +806,7 @@ struct EditorView: View {
             Text(label)
                 .font(.system(size: 11, weight: .medium, design: .monospaced))
                 .underline(underline)
-                .foregroundColor(isOn ? .white : .secondary)
+                .foregroundColor(isOn ? AppTheme.onTealSUI : .secondary)
                 .padding(.horizontal, 6)
                 .padding(.vertical, 2)
                 .background(isOn ? AppTheme.tealSUI : Color.secondary.opacity(0.15), in: RoundedRectangle(cornerRadius: 4))
