@@ -12,7 +12,6 @@ enum AppTheme {
     static let onTeal    = NSColor(red: 0.04, green: 0.10, blue: 0.08, alpha: 0.88)
     static let onTealSUI = Color(red: 0.04, green: 0.10, blue: 0.08)
     static let editorDarkBG = NSColor(red: 0.11, green: 0.13, blue: 0.13, alpha: 1.0)
-    static let gutterDarkBG = NSColor(red: 0.09, green: 0.11, blue: 0.11, alpha: 1.0)
 }
 
 // MARK: - Editor Font
@@ -126,20 +125,9 @@ class LineNumberRulerView: NSRulerView {
               let container = textView.textContainer else { return }
         
         let isDark = effectiveAppearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
-        // Derived from the editor background so the gutter suits whichever syntax theme is active.
-        let editorBG = textView.backgroundColor.usingColorSpace(.deviceRGB) ?? textView.backgroundColor
-        if showsLineNumbers {
-            (editorBG.blended(withFraction: isDark ? 0.10 : 0.025, of: .black)
-                ?? (isDark ? AppTheme.gutterDarkBG : NSColor(white: 0.95, alpha: 1.0))).setFill()
-            bounds.fill()
-            
-            (isDark ? NSColor.white.withAlphaComponent(0.06) : NSColor.black.withAlphaComponent(0.07)).setFill()
-            NSRect(x: bounds.width - 1, y: bounds.minY, width: 1, height: bounds.height).fill()
-        } else {
-            // Presenting: blend into the editor.
-            editorBG.setFill()
-            bounds.fill()
-        }
+        // The editor's own background, so the gutter suits whichever syntax theme is active.
+        textView.backgroundColor.setFill()
+        bounds.fill()
         
         // Chevrons only show on hover, for folded lines, or while presenting — don't rescan
         // the document on every keystroke's redraw otherwise.
@@ -173,7 +161,7 @@ class LineNumberRulerView: NSRulerView {
         // caret's wrapped row and hides whenever the editor's does (selection, multiple carets).
         if showsLineNumbers, let band = textView.currentLineRect() {
             (isDark ? NSColor.white.withAlphaComponent(0.045) : NSColor.black.withAlphaComponent(0.045)).setFill()
-            NSRect(x: 0, y: band.minY - scrollOffset, width: width - 1, height: band.height).fill(using: .sourceOver)
+            NSRect(x: 0, y: band.minY - scrollOffset, width: width, height: band.height).fill(using: .sourceOver)
         }
 
         func drawNum(_ n: Int, _ docY: CGFloat, lineHeight: CGFloat = 0) {
@@ -1547,12 +1535,17 @@ struct EditorView: View {
         var commands: [EditorCommand] = [
             EditorCommand(title: "Save to Clipboard", section: "File", shortcut: "⌘S", run: onSave),
             EditorCommand(title: "Save and Paste", section: "File", shortcut: "⌘↩", run: onSaveAndPaste),
+            EditorCommand(title: "Copy to Clipboard", section: "File", run: copyDocument),
             EditorCommand(title: "Revert to Original", section: "File", isEnabled: viewModel.isDirty && !viewModel.isScratch,
                           detail: viewModel.isScratch ? "Not available for scratch pads" : (viewModel.isDirty ? nil : "No changes yet"),
                           run: revertToOriginal),
             EditorCommand(title: "New Scratch", section: "File", shortcut: "⌘N", run: onNewScratch),
             EditorCommand(title: viewModel.isScratch ? "Discard Scratch Pad" : "Discard Edit", section: "File", shortcut: "⌥⌘W",
                           key: "File/Discard", run: discardDocument),
+            EditorCommand(title: "Clear Scratch Pad", section: "File", isEnabled: viewModel.isScratch && !viewModel.text.isEmpty,
+                          detail: viewModel.isScratch ? (viewModel.text.isEmpty ? "Already empty" : nil) : "Scratch pads only") {
+                transform("Clear Scratch Pad", scope: .document) { _ in "" }
+            },
             EditorCommand(title: viewModel.isScratch ? "Hide Scratch Pad" : "Hide Editor", section: "File", shortcut: "Esc",
                           key: "File/Close", run: cancelEditor),
             EditorCommand(title: undoManager?.undoMenuItemTitle ?? "Undo", section: "Edit", shortcut: "⌘Z",
@@ -1624,6 +1617,11 @@ struct EditorView: View {
             EditorCommand(title: "Reset Zoom", section: "View", shortcut: "⌘0", run: resetZoom),
         ]
         commands += presentationCommands
+        commands += OpenIn.installed.map { app, url in
+            EditorCommand(title: "Open in: \(app.name)", section: "File") {
+                OpenIn.open(viewModel.text, language: viewModel.currentLanguage, in: app, at: url)
+            }
+        }
         // "Indent Using" only changes what Tab inserts; "Convert" also re-indents the text.
         let indentations: [(label: String, value: Indentation)] = [("Spaces (2)", .spaces(2)), ("Spaces (4)", .spaces(4)), ("Tabs", .tabs)]
         commands += indentations.map { option in
@@ -1847,6 +1845,13 @@ struct EditorView: View {
         AppDelegate.shared?.showToast("Copied \(path.count > 60 ? String(path.prefix(57)) + "…" : path)")
     }
     
+    /// Unlike Save to Clipboard, leaves the editor open and the document unsaved.
+    private func copyDocument() {
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(viewModel.text, forType: .string)
+        AppDelegate.shared?.showToast("Copied to clipboard")
+    }
+
     /// Pasting into an empty scratch pad (or over everything) re-detects the language and
     /// indentation, unless the user picked a language themselves.
     private func redetectLanguageAfterPaste() {
@@ -2724,7 +2729,7 @@ final class MangleTextView: NSTextView {
         var lineStart = 0
         text.getLineStart(&lineStart, end: nil, contentsEnd: nil, for: NSRange(location: charRange.location, length: 0))
 
-        let insetX = textContainerInset.width
+        let insetX = textContainerInset.width + container.lineFragmentPadding
         let insetY = textContainerInset.height
 
         let path = NSBezierPath()
@@ -2750,13 +2755,14 @@ final class MangleTextView: NSTextView {
                     else { break }
                 }
                 let levels = columns / tabSize
-                if levels > 0 {
+                // Column 0 is just the text's left edge, so guides start at the first indent stop.
+                if levels > 1 {
                     let glyphIdx = layoutManager.glyphIndexForCharacter(at: ls)
                     if glyphIdx < layoutManager.numberOfGlyphs {
                         let fragRect = layoutManager.lineFragmentRect(forGlyphAt: glyphIdx, effectiveRange: nil)
                         let top = fragRect.origin.y + insetY
                         let bottom = top + fragRect.height
-                        for level in 0..<levels {
+                        for level in 1..<levels {
                             let x = insetX + CGFloat(level * tabSize) * charWidth
                             path.move(to: NSPoint(x: x, y: top))
                             path.line(to: NSPoint(x: x, y: bottom))
@@ -3198,7 +3204,7 @@ struct CustomTextEditor: NSViewRepresentable {
         }
         
         static func textInset(presenting: Bool) -> NSSize {
-            presenting ? NSSize(width: 28, height: 24) : NSSize(width: 14, height: 14)
+            presenting ? NSSize(width: 28, height: 24) : NSSize(width: 6, height: 14)
         }
         
         static func pairsQuotes(_ language: String) -> Bool {
