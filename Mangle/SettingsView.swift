@@ -380,6 +380,8 @@ struct SettingsView: View {
     @State private var lightTheme: String
     @State private var presentationHighContrast: Bool
     @State private var presentationLineNumbers: Bool
+    /// Which theme the preview shows: the last one picked, else the one for the current appearance.
+    @State private var previewDark: Bool?
     
     init() {
         let settings = SettingsManager.shared
@@ -516,7 +518,10 @@ struct SettingsView: View {
                             TealSegmentedPicker(selection: $appearance, options: AppAppearance.allCases.map { ($0, $0.rawValue) })
                                 .frame(width: 200)
                             // Previewed straight away; Save keeps it, and Cancel or closing reverts.
-                            .onChange(of: appearance) { NSApp.appearance = appearance.nsAppearance }
+                            .onChange(of: appearance) {
+                                NSApp.appearance = appearance.nsAppearance
+                                previewDark = nil
+                            }
                         }
                         
                         Divider()
@@ -525,6 +530,7 @@ struct SettingsView: View {
                             Text("Dark Theme")
                             Spacer()
                             themePicker($darkTheme)
+                                .onChange(of: darkTheme) { previewDark = true }
                         }
                         
                         Divider()
@@ -533,7 +539,12 @@ struct SettingsView: View {
                             Text("Light Theme")
                             Spacer()
                             themePicker($lightTheme)
+                                .onChange(of: lightTheme) { previewDark = false }
                         }
+                        
+                        let showDark = previewDark ?? (colorScheme == .dark)
+                        ThemePreview(theme: showDark ? darkTheme : lightTheme, font: editorFont)
+                            .help("Preview of the \(showDark ? "dark" : "light") theme")
                         
                         Divider()
                         
@@ -644,6 +655,60 @@ struct SettingsView: View {
         .labelsHidden()
         .frame(width: 180)
         .id(colorScheme)
+    }
+}
+
+/// A short code sample drawn in a syntax theme, so themes can be compared without opening the editor.
+struct ThemePreview: View {
+    var theme: String
+    var font: EditorFont
+    
+    // Highlightr spins up a JavaScript context, so one is shared by every preview.
+    private static let highlightr = Highlightr()
+    private static let sample = """
+    // Greet everyone on the list
+    func greet(_ names: [String]) -> Int {
+        for name in names {
+            print("Hello, \\(name)!")
+        }
+        return names.count * 42
+    }
+    """
+    
+    var body: some View {
+        let (code, background) = render()
+        AttributedLabel(text: code)
+            .padding(10)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(Color(nsColor: background), in: RoundedRectangle(cornerRadius: 6))
+            .overlay(RoundedRectangle(cornerRadius: 6).strokeBorder(Color.primary.opacity(0.1)))
+    }
+    
+    private func render() -> (NSAttributedString, NSColor) {
+        guard let highlightr = Self.highlightr else {
+            return (NSAttributedString(string: Self.sample), .textBackgroundColor)
+        }
+        highlightr.setTheme(to: theme)
+        highlightr.theme.setCodeFont(font.nsFont(size: 11))
+        let code = highlightr.highlight(Self.sample, as: "swift") ?? NSAttributedString(string: Self.sample)
+        return (code, highlightr.theme.themeBackgroundColor ?? .textBackgroundColor)
+    }
+}
+
+/// Shows an attributed string with its AppKit colors, which SwiftUI's `Text` drops.
+private struct AttributedLabel: NSViewRepresentable {
+    var text: NSAttributedString
+    
+    func makeNSView(context: Context) -> NSTextField {
+        let field = NSTextField(labelWithString: "")
+        field.isSelectable = false
+        field.lineBreakMode = .byClipping
+        field.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        return field
+    }
+    
+    func updateNSView(_ field: NSTextField, context: Context) {
+        field.attributedStringValue = text
     }
 }
 
