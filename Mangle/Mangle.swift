@@ -34,7 +34,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMenuDele
     var historyManager = HistoryManager()
     var statusItem: NSStatusItem?
     var eventHandlerInstalled = false
-    /// Handles keys pressed in Recent Snippets; set by `HistoryView`. Returns nil when handled.
+    /// Handles keys pressed in History; set by `HistoryView`. Returns nil when handled.
     var historyKeyHandler: ((NSEvent) -> NSEvent?)?
     var keyEventMonitor: Any?
     var clipboardChangeCountOnHide: Int = 0
@@ -145,7 +145,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMenuDele
         // Create menu bar icon
         setupMenuBar()
         
-        // Recent Snippets' keys (see `HistoryView.handleKey`).
+        // History's keys (see `HistoryView.handleKey`).
         keyEventMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
             guard let self, let window = self.historyWindow, event.window === window,
                   let handler = self.historyKeyHandler else { return event }
@@ -214,7 +214,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMenuDele
         scratchItem.keyEquivalentModifierMask = settings.scratchShortcut.cocoaModifiers
         menu.addItem(scratchItem)
         
-        let historyItem = NSMenuItem(title: "Recent Snippets", action: #selector(showHistory), keyEquivalent: settings.historyShortcut.keyEquivalent)
+        let historyItem = NSMenuItem(title: "Open History", action: #selector(showHistory), keyEquivalent: settings.historyShortcut.keyEquivalent)
         historyItem.keyEquivalentModifierMask = settings.historyShortcut.cocoaModifiers
         menu.addItem(historyItem)
         
@@ -233,7 +233,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMenuDele
         statusItem?.menu = menu
     }
     
-    /// The Copy Recent submenu: the first few snippets, in Recent Snippets' order.
+    /// The Copy Recent submenu: the first few snippets, in History's order.
     func menuNeedsUpdate(_ menu: NSMenu) {
         menu.removeAllItems()
         let entries = historyManager.entries
@@ -337,9 +337,11 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMenuDele
     
     /// ⌥⌘W: throws away the document on screen and hides the editor. Unsaved text still
     /// goes to history first — ⌥⌘W is also "Close All", so it's easy to press by habit.
+    /// Unlike Esc, it doesn't return to History when the edit came from there.
     func discardDocument() {
         let current = editorViewModel.buffer(scratch: editorViewModel.isScratch)
         if current.isDirty { stash(current.text, isScratch: editorViewModel.isScratch) }
+        closeHistory()
         dismissEditor()
         editorViewModel.discard()
     }
@@ -707,7 +709,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMenuDele
         hotKeyID2.id = 2
         let status2 = RegisterEventHotKey(settings.historyShortcut.keyCode, settings.historyShortcut.modifiers, hotKeyID2, GetApplicationEventTarget(), 0, &historyHotKeyRef)
         if status2 != noErr {
-            DispatchQueue.main.async { self.showToast("⚠️ Recent Snippets shortcut conflict") }
+            DispatchQueue.main.async { self.showToast("⚠️ History shortcut conflict") }
         }
         
         var hotKeyID3 = EventHotKeyID()
@@ -719,7 +721,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMenuDele
         }
     }
     
-    /// The history shortcut. Pressed while Recent Snippets is frontmost, it hides it.
+    /// The history shortcut. Pressed while History is frontmost, it hides it.
     @objc func showHistory() {
         if historyWindow?.isKeyWindow == true {
             closeHistory()
@@ -774,7 +776,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMenuDele
         )
         
         place(window, replacing: anchor)
-        window.title = "Recent Snippets"
+        window.title = "History"
         window.identifier = NSUserInterfaceItemIdentifier("history")
         window.contentView = NSHostingView(rootView: contentView)
         window.level = .floating
@@ -827,7 +829,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMenuDele
         openEdit(entry.text, origin: .history, language: entry.language, sourceEntryID: entry.id, replacing: anchor)
     }
     
-    /// ⌘↩ / ⌘1–9 in Recent Snippets: pastes the entry into the app the user came from.
+    /// ⌘↩ / ⌘1–9 in History: pastes the entry into the app the user came from.
     func pasteFromHistory(_ entry: HistoryEntry) {
         let pasteboard = NSPasteboard.general
         pasteboard.clearContents()
@@ -874,7 +876,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMenuDele
         rememberFrontmostApp()
         let anchor = visibleWindowFrame()
         
-        // Recent Snippets is frontmost: there's no selection to read, so use the clipboard —
+        // History is frontmost: there's no selection to read, so use the clipboard —
         // or, mid-way through editing one of its entries, go back to that.
         if historyWindow?.isKeyWindow == true {
             if vm.buffer(scratch: false).sourceEntryID != nil {
@@ -1043,6 +1045,10 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMenuDele
             self?.togglePresentation()
         }, onTogglePresentationFullScreen: { [weak self] in
             self?.togglePresentationFullScreen()
+        }, onShowHistory: { [weak self] in
+            self?.showHistory()
+        }, onShowSettings: { [weak self] in
+            self?.showSettings()
         })
         
         let window = NSWindow(

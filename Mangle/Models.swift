@@ -58,7 +58,7 @@ class HistoryManager: ObservableObject {
     private var metaCache: [UUID: HistoryEntryMeta] = [:]
     private let saveQueue = DispatchQueue(label: "co.liamo.mangle.history-save", qos: .utility)
     private var pendingSave: DispatchWorkItem?
-    /// The last deleted entry and where it was, for ⌘Z in Recent Snippets.
+    /// The last deleted entry and where it was, for ⌘Z in History.
     private var lastDeleted: (entry: HistoryEntry, index: Int)?
 
     nonisolated private static var historyFileURL: URL {
@@ -149,7 +149,7 @@ class HistoryManager: ObservableObject {
         saveHistory()
     }
 
-    /// Called when Recent Snippets closes, so ⌘Z next time can't bring back an old deletion.
+    /// Called when History closes, so ⌘Z next time can't bring back an old deletion.
     func forgetDeleted() {
         lastDeleted = nil
     }

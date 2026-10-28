@@ -303,6 +303,8 @@ struct EditorView: View {
     var onNewScratch: () -> Void = {}
     var onTogglePresentation: () -> Void = {}
     var onTogglePresentationFullScreen: () -> Void = {}
+    var onShowHistory: () -> Void = {}
+    var onShowSettings: () -> Void = {}
     @Environment(\.colorScheme) private var colorScheme
     @State private var keyMonitor: Any?
     @State private var textView: NSTextView?
@@ -350,7 +352,7 @@ struct EditorView: View {
     /// The "Presenting" hint, shown briefly on entering presentation mode.
     @State private var showPresentingHint = false
     
-    private static let languages: [(label: String, id: String)] = [
+    static let languages: [(label: String, id: String)] = [
         ("Auto-detect", "auto"),
         ("Plain Text", "plaintext"),
         ("Bash", "bash"),
@@ -609,6 +611,8 @@ struct EditorView: View {
                 if !editingFieldFocused {
                     if mods == .command, key == "e" { useSelectionForFind(); return nil }
                     if mods == .command, key == "/" { toggleComment(); return nil }
+                    if mods == .command, key == "]" { indentLines(outdent: false); return nil }
+                    if mods == .command, key == "[" { indentLines(outdent: true); return nil }
                     if mods == [.command, .shift], key == "d" { if let tv = textView { duplicateLine(in: tv) }; return nil }
                     if mods == [.control, .command], key == "g" { mtv?.selectAllOccurrences(); return nil }
                     if mods == .option, event.keyCode == 6 { settings.wordWrap.toggle(); return nil } // ⌥Z
@@ -815,8 +819,10 @@ struct EditorView: View {
     
     // MARK: - Language Picker
     
-    private var currentLanguageLabel: String {
-        Self.languages.first { $0.id == viewModel.currentLanguage }?.label ?? viewModel.currentLanguage
+    private var currentLanguageLabel: String { Self.languageLabel(viewModel.currentLanguage) }
+
+    static func languageLabel(_ id: String) -> String {
+        languages.first { $0.id == id }?.label ?? id
     }
     
     /// The dot beside the language in the bottom bar — roughly each language's usual brand colour,
@@ -902,7 +908,7 @@ struct EditorView: View {
                 }
                 .padding(.horizontal, 14)
 
-                barDivider
+                BarDivider()
             }
 
             HStack(spacing: 6) {
@@ -969,13 +975,13 @@ struct EditorView: View {
             }
             .padding(.horizontal, 8)
 
-            barDivider
+            BarDivider()
 
             HStack(spacing: 4) {
                 // Hiding never loses anything: the hotkey brings the text back, and it goes to
                 // history if something replaces it.
                 Button(action: cancelEditor) {
-                    bottomAction("Hide", shortcut: showBadges ? "Esc" : nil, hovered: hoverCancel)
+                    BarActionLabel(title: "Hide", shortcut: showBadges ? "Esc" : nil, hovered: hoverCancel)
                 }
                 .help(viewModel.isScratch
                       ? "Hide the scratch pad — it comes back where you left it (Esc)"
@@ -987,7 +993,7 @@ struct EditorView: View {
                 Button {
                     onSaveAndPaste()
                 } label: {
-                    bottomAction("Paste", shortcut: showBadges ? "⌘↩" : nil, hovered: hoverPaste)
+                    BarActionLabel(title: "Paste", shortcut: showBadges ? "⌘↩" : nil, hovered: hoverPaste)
                 }
                 .buttonStyle(.plain)
                 .onHover { hoverPaste = $0 }
@@ -997,22 +1003,7 @@ struct EditorView: View {
                 Button {
                     onSave()
                 } label: {
-                    HStack(alignment: .firstTextBaseline, spacing: 6) {
-                        Text("Save")
-                            .fontWeight(.medium)
-                            .foregroundColor(AppTheme.tealSUI)
-                        if showBadges {
-                            Text("⌘S")
-                                .font(.system(size: 10, weight: .medium))
-                                .foregroundColor(AppTheme.tealSUI.opacity(0.6))
-                        }
-                    }
-                    .font(.system(size: 12))
-                    .fixedSize()
-                    .padding(.horizontal, 8)
-                    .padding(.vertical, 3)
-                    .background(AppTheme.tealSUI.opacity(hoverSave ? 0.22 : 0.14))
-                    .cornerRadius(5)
+                    BarPrimaryActionLabel(title: "Save", shortcut: showBadges ? "⌘S" : nil, hovered: hoverSave)
                 }
                 .buttonStyle(.plain)
                 .keyboardShortcut("s", modifiers: .command)
@@ -1031,36 +1022,6 @@ struct EditorView: View {
             .frame(width: 24, height: 20)
             .background(hovered ? Color.secondary.opacity(0.12) : Color.clear)
             .cornerRadius(5)
-    }
-    
-    private var barDivider: some View {
-        Rectangle()
-            .fill(Color.secondary.opacity(0.2))
-            .frame(width: 1, height: 16)
-    }
-    
-    @ViewBuilder
-    private func bottomAction(_ label: String, shortcut: String?, hovered: Bool = false) -> some View {
-        HStack(alignment: .firstTextBaseline, spacing: 6) {
-            Text(label)
-                .foregroundColor(hovered ? .primary : .primary.opacity(0.75))
-            if let shortcut {
-                shortcutBadge(shortcut, hovered: hovered)
-            }
-        }
-        .font(.system(size: 12))
-        .fixedSize()
-        .padding(.horizontal, 6)
-        .padding(.vertical, 3)
-        .background(hovered ? Color.secondary.opacity(0.12) : Color.clear)
-        .cornerRadius(5)
-    }
-    
-    @ViewBuilder
-    private func shortcutBadge(_ text: String, hovered: Bool = false) -> some View {
-        Text(text)
-            .font(.system(size: 10, weight: .medium))
-            .foregroundColor(hovered ? .secondary : .secondary.opacity(0.6))
     }
     
     // MARK: - Find Logic
@@ -1557,6 +1518,13 @@ struct EditorView: View {
             EditorCommand(title: "Select All", section: "Selection", shortcut: "⌘A") { textView?.selectAll(nil) },
             EditorCommand(title: viewModel.isPresenting ? "Stop Presenting" : "Start Presenting", section: "View", shortcut: "⌥⌘P",
                           key: "View/Presenting", run: onTogglePresentation),
+            EditorCommand(title: "Open History", section: "App", run: onShowHistory),
+            EditorCommand(title: "Open Settings…", section: "App", run: onShowSettings),
+            EditorCommand(title: settings.pauseHistory ? "Resume History" : "Pause History", section: "App",
+                          key: "App/Pause History") {
+                settings.pauseHistory.toggle()
+                AppDelegate.shared?.showToast(settings.pauseHistory ? "History paused" : "History resumed")
+            },
             EditorCommand(title: "Show Keyboard Shortcuts", section: "Help", isEnabled: !viewModel.isPresenting,
                           detail: viewModel.isPresenting ? "Not while presenting" : nil) { showShortcuts = true },
             EditorCommand(title: "Fold", section: "Folding", shortcut: "⌥⌘←") { mtv?.foldAtCaret() },
@@ -1601,6 +1569,8 @@ struct EditorView: View {
             EditorCommand(title: "Use Selection for Find", section: "Find", shortcut: "⌘E", run: useSelectionForFind),
             EditorCommand(title: "Go to Line…", section: "Navigate", shortcut: "⌃G") { openPalette(query: ":") },
             EditorCommand(title: "Toggle Comment", section: "Edit", shortcut: "⌘/", run: toggleComment),
+            EditorCommand(title: "Indent Lines", section: "Edit", shortcut: "⌘]") { indentLines(outdent: false) },
+            EditorCommand(title: "Outdent Lines", section: "Edit", shortcut: "⌘[") { indentLines(outdent: true) },
             EditorCommand(title: "Select Next Occurrence", section: "Selection", shortcut: "⌘D") { mtv?.selectNextOccurrence() },
             EditorCommand(title: "Select All Occurrences", section: "Selection", shortcut: "⌃⌘G") { mtv?.selectAllOccurrences() },
             EditorCommand(title: "Select Line", section: "Selection", shortcut: "⌘L") { if let tv = textView { selectLine(in: tv) } },
@@ -1630,6 +1600,14 @@ struct EditorView: View {
         }
         commands += indentations.map { option in
             EditorCommand(title: "Convert Indentation to \(option.label)", section: "Indentation") { convertIndentation(to: option.value) }
+        }
+        commands += AppAppearance.allCases.map { appearance in
+            EditorCommand(title: "Set Appearance: \(appearance.rawValue)", section: "Appearance",
+                          isCurrent: settings.appearance == appearance) { settings.appearance = appearance }
+        }
+        commands += EditorFont.allCases.map { font in
+            EditorCommand(title: "Set Font: \(font.rawValue)", section: "Appearance",
+                          isCurrent: settings.editorFont == font) { settings.editorFont = font }
         }
         commands += Self.languages.map { lang in
             let isAuto = lang.id == "auto"
@@ -1684,6 +1662,10 @@ struct EditorView: View {
             t("Tabs → Spaces", "Whitespace", scope: .linesOrDocument) { TextTransforms.tabsToSpaces($0, tabSize: width) },
             t("Spaces → Tabs", "Whitespace", scope: .linesOrDocument) { TextTransforms.spacesToTabs($0, tabSize: width) },
         ]))
+        sections.append(("Cleanup", [
+            t("Straighten Quotes", "Cleanup", TextTransforms.straightenQuotes),
+            t("Remove Invisible Characters", "Cleanup", TextTransforms.removeInvisibleCharacters),
+        ]))
         sections.append(("Case", [
             t("lowercase", "Case", shortcut: "⇧⌘L", key: .init("l", modifiers: [.command, .shift])) { $0.lowercased() },
             t("UPPERCASE", "Case", shortcut: "⇧⌘U", key: .init("u", modifiers: [.command, .shift])) { $0.uppercased() },
@@ -1716,6 +1698,7 @@ struct EditorView: View {
             t("URL Decode", "Encode / Decode", TextTransforms.urlDecode),
             t("HTML Entity Encode", "Encode / Decode", TextTransforms.htmlEntityEncode),
             t("HTML Entity Decode", "Encode / Decode", TextTransforms.htmlEntityDecode),
+            t("Convert Timestamp ↔ Date", "Encode / Decode", TextTransforms.convertTimestamp),
         ]))
         sections.append(("Line Endings", [
             t("Convert to LF", "Line Endings", scope: .document, TextTransforms.toLF),
@@ -1901,6 +1884,14 @@ struct EditorView: View {
             return
         }
         transform("Toggle Comment", scope: .currentLines) { TextTransforms.toggleComment($0, syntax: syntax) }
+    }
+    
+    private func indentLines(outdent: Bool) {
+        let unit = documentIndentation.unit
+        let tabSize = documentIndentWidth
+        transform(outdent ? "Outdent Lines" : "Indent Lines", scope: .currentLines) {
+            outdent ? TextTransforms.outdentLines($0, tabSize: tabSize) : TextTransforms.indentLines($0, unit: unit)
+        }
     }
     
     private func revertToOriginal() {
@@ -2122,6 +2113,8 @@ final class MangleTextView: NSTextView {
     
     /// Folded ranges — each is the text between a bracket pair. Nested folds are allowed.
     var folds: [NSRange] = [] { didSet { visibleFolds = Self.outermostFolds(folds) } }
+    /// Off for read-only previews, which have no caret to mark.
+    var showsCurrentLine = true
     /// `folds` minus those inside another fold: sorted and disjoint.
     private(set) var visibleFolds: [NSRange] = []
     /// Skip brackets inside "strings" when finding foldable blocks (off for prose).
@@ -2354,7 +2347,7 @@ final class MangleTextView: NSTextView {
     // MARK: Current line highlight
     
     func currentLineRect() -> NSRect? {
-        guard layoutManager != nil, !hidesCaret, !hasMultipleSelections, selectedRange().length == 0,
+        guard layoutManager != nil, showsCurrentLine, !hidesCaret, !hasMultipleSelections, selectedRange().length == 0,
               let caret = caretRect(at: selectedRange().location) else { return nil }
         return NSRect(x: 0, y: caret.minY, width: bounds.width, height: caret.height)
     }
@@ -3740,20 +3733,11 @@ struct CustomTextEditor: NSViewRepresentable {
                 let endsWithNewline = selectedLines.hasSuffix("\n")
                 if endsWithNewline { lines.removeLast() }
                 
-                let modifiedLines: [String]
-                if reverse {
-                    // Each line loses up to one indent level on its own (a tab, or up to
-                    // tabSize spaces) — matching Xcode/VS Code.
-                    modifiedLines = lines.map { line in
-                        if line.hasPrefix("\t") { return String(line.dropFirst()) }
-                        let leading = line.prefix(while: { $0 == " " }).count
-                        return String(line.dropFirst(min(leading, tabSize)))
-                    }
-                } else {
-                    modifiedLines = lines.map { $0.isEmpty ? $0 : spaces + $0 }
-                }
-                
-                let newText = modifiedLines.joined(separator: "\n") + (endsWithNewline ? "\n" : "")
+                let block = lines.joined(separator: "\n")
+                let modified = reverse
+                    ? TextTransforms.outdentLines(block, tabSize: tabSize)
+                    : TextTransforms.indentLines(block, unit: spaces)
+                let newText = modified + (endsWithNewline ? "\n" : "")
                 if textView.shouldChangeText(in: fullRange, replacementString: newText) {
                     textView.replaceCharacters(in: fullRange, with: newText)
                     textView.didChangeText()
@@ -3885,6 +3869,90 @@ private struct BarChipLabel: View {
     }
 }
 
+/// A bottom-bar button's label: title and an optional shortcut, on a fill that shows on hover.
+struct BarActionLabel: View {
+    let title: String
+    var systemImage: String? = nil
+    var shortcut: String? = nil
+    let hovered: Bool
+
+    var body: some View {
+        HStack(alignment: .firstTextBaseline, spacing: 6) {
+            if let systemImage {
+                Image(systemName: systemImage)
+                    .font(.system(size: 10, weight: .medium))
+                    .foregroundColor(.secondary.opacity(hovered ? 0.9 : 0.6))
+            }
+            Text(title)
+                .foregroundColor(hovered ? .primary : .primary.opacity(0.75))
+            if let shortcut {
+                Text(shortcut)
+                    .font(.system(size: 10, weight: .medium))
+                    .foregroundColor(hovered ? .secondary : .secondary.opacity(0.6))
+            }
+        }
+        .font(.system(size: 12))
+        .fixedSize()
+        .padding(.horizontal, 6)
+        .padding(.vertical, 3)
+        .background(hovered ? Color.secondary.opacity(0.12) : Color.clear)
+        .cornerRadius(5)
+    }
+}
+
+/// The window's main action (Save, Edit): teal text on a teal tint.
+struct BarPrimaryActionLabel: View {
+    let title: String
+    var shortcut: String? = nil
+    let hovered: Bool
+
+    var body: some View {
+        HStack(alignment: .firstTextBaseline, spacing: 6) {
+            Text(title)
+                .fontWeight(.medium)
+                .foregroundColor(AppTheme.tealSUI)
+            if let shortcut {
+                Text(shortcut)
+                    .font(.system(size: 10, weight: .medium))
+                    .foregroundColor(AppTheme.tealSUI.opacity(0.6))
+            }
+        }
+        .font(.system(size: 12))
+        .fixedSize()
+        .padding(.horizontal, 8)
+        .padding(.vertical, 3)
+        .background(AppTheme.tealSUI.opacity(hovered ? 0.22 : 0.14))
+        .cornerRadius(5)
+    }
+}
+
+/// A count and its unit ("12 ln") in the bottom bar.
+struct BarStat: View {
+    let value: Int
+    let label: String
+    var valueWidth: CGFloat = 0
+
+    var body: some View {
+        HStack(spacing: 3) {
+            Text("\(value)")
+                .monospacedDigit()
+                .foregroundColor(.primary.opacity(0.7))
+                .frame(minWidth: valueWidth, alignment: .trailing)
+            Text(label)
+                .foregroundColor(.secondary.opacity(0.7))
+        }
+        .font(.system(size: 11))
+    }
+}
+
+struct BarDivider: View {
+    var body: some View {
+        Rectangle()
+            .fill(Color.secondary.opacity(0.2))
+            .frame(width: 1, height: 16)
+    }
+}
+
 /// A menu item that runs a closure (NSMenuItem needs a target/action otherwise).
 private final class ClosureMenuItem: NSMenuItem {
     private let handler: () -> Void
@@ -3924,15 +3992,7 @@ private struct TextStatsLabel: View {
     }
     
     private func pill(value: Int, label: String, valueWidth: CGFloat) -> some View {
-        HStack(spacing: 3) {
-            Text("\(value)")
-                .monospacedDigit()
-                .foregroundColor(.primary.opacity(0.7))
-                .frame(minWidth: valueWidth, alignment: .trailing)
-            Text(label)
-                .foregroundColor(.secondary.opacity(0.7))
-        }
-        .font(.system(size: 11))
+        BarStat(value: value, label: label, valueWidth: valueWidth)
     }
 }
 
@@ -3959,6 +4019,8 @@ private struct ShortcutsPopover: View {
             ("⌘ ⌫",        "Delete to line start"),
             ("Tab",        "Indent"),
             ("⇧ Tab",      "Unindent"),
+            ("⌘ ]",        "Indent lines"),
+            ("⌘ [",        "Outdent lines"),
         ]),
         ("Selection", [
             ("⌘ A",        "Select all"),

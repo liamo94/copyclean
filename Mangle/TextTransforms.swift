@@ -149,6 +149,83 @@ nonisolated enum TextTransforms {
             .joined(separator: "\n")
     }
 
+    /// Adds one indent level to every non-empty line.
+    static func indentLines(_ text: String, unit: String) -> String {
+        text.components(separatedBy: "\n")
+            .map { $0.isEmpty ? $0 : unit + $0 }
+            .joined(separator: "\n")
+    }
+
+    /// Each line loses up to one indent level on its own (a tab, or up to tabSize spaces) —
+    /// matching Xcode/VS Code.
+    static func outdentLines(_ text: String, tabSize: Int) -> String {
+        text.components(separatedBy: "\n").map { line in
+            if line.hasPrefix("\t") { return String(line.dropFirst()) }
+            let leading = line.prefix(while: { $0 == " " }).count
+            return String(line.dropFirst(min(leading, tabSize)))
+        }.joined(separator: "\n")
+    }
+
+    // MARK: Cleanup
+
+    static func straightenQuotes(_ text: String) -> String {
+        String(String.UnicodeScalarView(text.unicodeScalars.map { scalar -> Unicode.Scalar in
+            switch scalar.value {
+            case 0x2018, 0x2019, 0x201A, 0x201B, 0x2032: return "'"
+            case 0x201C, 0x201D, 0x201E, 0x201F, 0x2033: return "\""
+            default: return scalar
+            }
+        }))
+    }
+
+    /// Strips zero-width characters, BOMs and soft hyphens, and turns non-breaking and other
+    /// Unicode spaces into plain ones. Zero-width joiners stay: emoji sequences need them.
+    static func removeInvisibleCharacters(_ text: String) -> String {
+        var scalars = String.UnicodeScalarView()
+        for scalar in text.unicodeScalars {
+            switch scalar.value {
+            case 0x200B, 0x2060, 0xFEFF, 0x00AD: continue
+            case 0x00A0, 0x2000...0x200A, 0x202F, 0x205F, 0x3000: scalars.append(" ")
+            default: scalars.append(scalar)
+            }
+        }
+        return String(scalars)
+    }
+
+    /// Converts a Unix timestamp (seconds or milliseconds) to an ISO 8601 date in the local
+    /// time zone, or an ISO 8601 date back to a timestamp.
+    static func convertTimestamp(_ text: String) throws -> String {
+        let value = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        let leading = String(text.prefix(while: { $0.isWhitespace }))
+        let trailing = String(text.reversed().prefix(while: { $0.isWhitespace }).reversed())
+        let formatter = ISO8601DateFormatter()
+        formatter.timeZone = .current
+
+        if value.range(of: #"^-?\d+(\.\d+)?$"#, options: .regularExpression) != nil, let number = Double(value) {
+            // 13-digit values are milliseconds; seconds won't reach 1e11 until the year 5138.
+            let isMilliseconds = abs(number) >= 1e11
+            let seconds = isMilliseconds ? number / 1000 : number
+            if seconds.truncatingRemainder(dividingBy: 1) != 0 {
+                formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+            }
+            return leading + formatter.string(from: Date(timeIntervalSince1970: seconds)) + trailing
+        }
+
+        let attempts: [ISO8601DateFormatter.Options] = [
+            [.withInternetDateTime, .withFractionalSeconds], [.withInternetDateTime], [.withFullDate],
+        ]
+        for options in attempts {
+            formatter.formatOptions = options
+            guard let date = formatter.date(from: value) else { continue }
+            let seconds = date.timeIntervalSince1970
+            let result = options.contains(.withFractionalSeconds) && seconds.truncatingRemainder(dividingBy: 1) != 0
+                ? String(Int64((seconds * 1000).rounded()))
+                : String(Int64(seconds.rounded(.down)))
+            return leading + result + trailing
+        }
+        throw TransformError("Select a Unix timestamp or an ISO 8601 date")
+    }
+
     /// Expands to the next tab stop rather than a fixed width, so tabs that appear mid-line
     /// (aligned comments, table-ish pasted data) stay aligned.
     static func tabsToSpaces(_ text: String, tabSize: Int) -> String {

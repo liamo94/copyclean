@@ -25,6 +25,8 @@ struct HistoryView: View {
     @State private var hoverPaste = false
     @State private var hoverEdit = false
     @State private var hoverDelete = false
+    @State private var hoveredRow: HistoryEntry.ID?
+    @ObservedObject private var settings = SettingsManager.shared
     @State private var lastTapEntry: HistoryEntry.ID? = nil
     @State private var lastTapTime: Date = .distantPast
     @FocusState private var searchFocused: Bool
@@ -77,7 +79,7 @@ struct HistoryView: View {
         }
     }
     
-    /// Every key pressed while Recent Snippets is the key window. Returns nil when handled.
+    /// Every key pressed while History is the key window. Returns nil when handled.
     private func handleKey(_ event: NSEvent) -> NSEvent? {
         // Mid-composition with an input method (Japanese, Chinese…), Return and Esc belong
         // to the search field: they confirm or cancel the characters being composed.
@@ -177,138 +179,67 @@ struct HistoryView: View {
     
     // MARK: - Bottom Bar
     
+    /// Laid out like the editor's bottom bar, from the same parts.
     private var bottomBar: some View {
         HStack(spacing: 0) {
-            // Left: timestamp + stats
             if let entry = selectedEntry {
                 let meta = historyManager.meta(for: entry)
-                HStack(spacing: 10) {
+                HStack(spacing: 12) {
                     Text(formatRelativeDate(entry.timestamp))
+                        .font(.system(size: 11))
                         .foregroundColor(.secondary)
-                        .font(.system(size: 12))
-                    
-                    barDivider
-                    
-                    statPill("\(meta.lines)", label: "lines")
-                    statPill("\(meta.words)", label: "words")
-                    statPill("\(meta.chars)", label: "chars")
+                        .fixedSize()
+                    HStack(spacing: 10) {
+                        BarStat(value: meta.lines, label: "ln")
+                        BarStat(value: meta.words, label: "wd")
+                        BarStat(value: meta.chars, label: "ch")
+                    }
+                    .fixedSize()
                 }
                 .padding(.horizontal, 14)
-            } else {
-                Spacer()
             }
             
-            Spacer()
+            Spacer(minLength: 0)
             
-            if selectedEntry != nil {
-                // Delete
-                Button {
-                    if let entry = selectedEntry { deleteEntry(entry) }
-                } label: {
-                    HStack(spacing: 6) {
-                        Image(systemName: "trash")
-                            .foregroundColor(hoverDelete ? .red.opacity(0.8) : .secondary.opacity(0.7))
-                            .font(.system(size: 11))
-                        Text("Delete")
-                            .foregroundColor(hoverDelete ? .primary : .primary.opacity(0.75))
-                            .font(.system(size: 12))
-                    }
-                    .padding(.horizontal, 6)
-                    .padding(.vertical, 3)
-                    .background(hoverDelete ? Color.red.opacity(0.08) : Color.clear)
-                    .cornerRadius(5)
+            if let entry = selectedEntry {
+                Button { deleteEntry(entry) } label: {
+                    BarActionLabel(title: "Delete", systemImage: "trash", hovered: hoverDelete)
                 }
                 .buttonStyle(.plain)
-                .padding(.horizontal, 8)
                 .onHover { hoverDelete = $0 }
-                
-                barDivider
-                
-                // Copy
-                Button {
-                    if let entry = selectedEntry { copyAndClose(entry) }
-                } label: {
-                    bottomAction("Copy", shortcut: "⌘C", hovered: hoverCopy)
-                }
-                .buttonStyle(.plain)
+                .help("Delete (⌫) — ⌘Z brings it back")
                 .padding(.horizontal, 8)
-                .onHover { hoverCopy = $0 }
                 
-                barDivider
+                BarDivider()
                 
-                // Paste
-                Button {
-                    if let entry = selectedEntry { onPaste(entry) }
-                } label: {
-                    bottomAction("Paste", shortcut: "⌘↩", hovered: hoverPaste)
-                }
-                .buttonStyle(.plain)
-                .padding(.horizontal, 8)
-                .onHover { hoverPaste = $0 }
-                .help("Paste into the app you came from (⌘↩, or ⌘1–⌘9 for the first nine)")
-                
-                barDivider
-                
-                // Edit
-                Button {
-                    if let entry = selectedEntry { onSelectEntry(entry) }
-                } label: {
-                    HStack(spacing: 6) {
-                        Text("Edit")
-                            .fontWeight(.medium)
-                            .foregroundColor(hoverEdit ? AppTheme.tealSUI : AppTheme.tealSUI.opacity(0.8))
-                        Text("↵")
-                            .font(.system(size: 10, weight: .medium))
-                            .foregroundColor(hoverEdit ? .secondary : .secondary.opacity(0.6))
+                HStack(spacing: 4) {
+                    Button { copyAndClose(entry) } label: {
+                        BarActionLabel(title: "Copy", shortcut: "⌘C", hovered: hoverCopy)
                     }
-                    .font(.system(size: 12))
-                    .padding(.horizontal, 6)
-                    .padding(.vertical, 3)
-                    .background(hoverEdit ? Color.secondary.opacity(0.12) : Color.clear)
-                    .cornerRadius(5)
+                    .buttonStyle(.plain)
+                    .onHover { hoverCopy = $0 }
+                    .help("Copy to the clipboard and close (⌘C)")
+                    
+                    Button { onPaste(entry) } label: {
+                        BarActionLabel(title: "Paste", shortcut: "⌘↩", hovered: hoverPaste)
+                    }
+                    .buttonStyle(.plain)
+                    .onHover { hoverPaste = $0 }
+                    .help("Paste into the app you came from (⌘↩, or ⌘1–⌘9 for the first nine)")
+                    
+                    Button { onSelectEntry(entry) } label: {
+                        BarPrimaryActionLabel(title: "Edit", shortcut: "↩", hovered: hoverEdit)
+                    }
+                    .buttonStyle(.plain)
+                    .onHover { hoverEdit = $0 }
+                    .help("Open in the editor (↩)")
                 }
-                .buttonStyle(.plain)
-                .padding(.horizontal, 8)
-                .onHover { hoverEdit = $0 }
+                .padding(.leading, 8)
+                .padding(.trailing, 10)
             }
         }
         .frame(height: 36)
         .background(Color(nsColor: .windowBackgroundColor))
-    }
-    
-    private var barDivider: some View {
-        Rectangle()
-            .fill(Color.secondary.opacity(0.2))
-            .frame(width: 1, height: 16)
-    }
-    
-    @ViewBuilder
-    private func bottomAction(_ label: String, shortcut: String, hovered: Bool) -> some View {
-        HStack(alignment: .firstTextBaseline, spacing: 6) {
-            Text(label)
-                .foregroundColor(hovered ? .primary : .primary.opacity(0.75))
-            Text(shortcut)
-                .font(.system(size: 10, weight: .medium))
-                .foregroundColor(hovered ? .secondary : .secondary.opacity(0.6))
-        }
-        .font(.system(size: 12))
-        .fixedSize()
-        .padding(.horizontal, 6)
-        .padding(.vertical, 3)
-        .background(hovered ? Color.secondary.opacity(0.12) : Color.clear)
-        .cornerRadius(5)
-    }
-    
-    @ViewBuilder
-    private func statPill(_ value: String, label: String) -> some View {
-        HStack(spacing: 3) {
-            Text(value)
-                .monospacedDigit()
-                .foregroundColor(AppTheme.tealSUI)
-            Text(label)
-                .foregroundColor(.secondary)
-        }
-        .font(.caption)
     }
     
     // MARK: - Sidebar
@@ -327,12 +258,18 @@ struct HistoryView: View {
                 )
             } else {
                 ScrollViewReader { proxy in
-                    List(selection: $selectedEntry) {
+                    // No selection binding: the list's own highlight would paint over the
+                    // row's, and keys and clicks already drive `selectedEntry`.
+                    List {
                         ForEach(Array(entries.enumerated()), id: \.element.id) { index, entry in
                             let isSelected = selectedEntry?.id == entry.id
                             HistoryEntryRow(entry: entry, meta: historyManager.meta(for: entry), isSelected: isSelected,
-                                            pasteShortcut: index < 9 ? "⌘\(index + 1)" : nil)
-                                .contentShape(Rectangle())
+                                            isHovered: hoveredRow == entry.id,
+                                            pasteShortcut: index < 9 ? "⌘\(index + 1)" : nil,
+                                            codeFont: settings.editorFont)
+                                .onHover { hovering in
+                                    if hovering { hoveredRow = entry.id } else if hoveredRow == entry.id { hoveredRow = nil }
+                                }
                                 .onTapGesture {
                                     NSApp.keyWindow?.makeFirstResponder(nil)
                                     let now = Date()
@@ -344,11 +281,9 @@ struct HistoryView: View {
                                         lastTapTime = now
                                     }
                                 }
-                                .listRowBackground(
-                                    isSelected
-                                    ? AppTheme.tealSUI.cornerRadius(6)
-                                    : Color.clear.cornerRadius(6)
-                                )
+                                .listRowInsets(EdgeInsets(top: 1, leading: 6, bottom: 1, trailing: 6))
+                                .listRowSeparator(.hidden)
+                                .listRowBackground(Color.clear)
                                 .contextMenu {
                                     Button("Paste") { onPaste(entry) }
                                     Button("Copy to Clipboard") { copyAndClose(entry) }
@@ -367,7 +302,8 @@ struct HistoryView: View {
                             }
                         }
                     }
-                    .listStyle(.sidebar)
+                    .listStyle(.plain)
+                    .scrollContentBackground(.hidden)
                     .onChange(of: selectedEntry) { _, entry in
                         if let entry { proxy.scrollTo(entry.id) }
                     }
@@ -380,6 +316,7 @@ struct HistoryView: View {
             }
         }
         .frame(width: 260)
+        .background(Color(nsColor: .windowBackgroundColor))
     }
     
     private var searchBar: some View {
@@ -399,9 +336,9 @@ struct HistoryView: View {
                 .buttonStyle(.borderless)
             }
         }
-        .padding(.horizontal, 10)
-        .padding(.vertical, 8)
-        .background(Color(nsColor: .controlBackgroundColor))
+        .font(.system(size: 13))
+        .padding(.horizontal, 12)
+        .frame(height: 36)
     }
     
     // MARK: - Detail Pane
@@ -412,7 +349,8 @@ struct HistoryView: View {
             let lang = entry.language ?? historyManager.meta(for: entry).detectedLanguage
             // No .id(entry.id): recreating the view per selection built a fresh Highlightr
             // (a new JS context evaluating ~1 MB of highlight.js) on every arrow key.
-            SyntaxPreviewView(entryID: entry.id, text: entry.text, language: lang, isDark: colorScheme == .dark)
+            SyntaxPreviewView(entryID: entry.id, text: entry.text, language: lang, lineCount: historyManager.meta(for: entry).lines,
+                              font: settings.editorFont.nsFont(size: settings.fontSize), isDark: colorScheme == .dark)
         } else {
             emptyState(
                 icon: "sidebar.left",
@@ -473,38 +411,33 @@ struct HistoryEntryRow: View {
     let entry: HistoryEntry
     let meta: HistoryEntryMeta
     var isSelected: Bool = false
+    var isHovered: Bool = false
     /// "⌘1"…"⌘9" for the first nine rows, which those keys paste.
     var pasteShortcut: String? = nil
+    /// The editor's font, so a snippet reads here as it will there.
+    var codeFont: EditorFont = .system
     
-    private var preview: String { meta.preview }
-    private var secondLine: String? { meta.secondLine }
-    private var detectedLanguage: String { entry.language ?? meta.detectedLanguage }
-    
-    private var languageLabel: String {
-        switch detectedLanguage {
-        case "plaintext":   return ""
-        case "javascript":  return "JS"
-        case "typescript":  return "TS"
-        case "xml":         return "HTML"
-        case "cpp":         return "C++"
-        default:            return detectedLanguage.prefix(1).uppercased() + detectedLanguage.dropFirst()
-        }
+    private var language: String { entry.language ?? meta.detectedLanguage }
+    private var secondLine: String? {
+        guard let line = meta.secondLine, !line.allSatisfy(\.isWhitespace) else { return nil }
+        return line
     }
     
     var body: some View {
         VStack(alignment: .leading, spacing: 3) {
-            Text(preview)
-                .font(.system(.body))
+            Text(meta.preview)
+                .font(Font(codeFont.nsFont(size: 12)))
+                .foregroundColor(.primary.opacity(isSelected ? 1 : 0.85))
                 .lineLimit(1)
             
-            if let second = secondLine {
-                Text(second)
-                    .font(.caption)
+            if let secondLine {
+                Text(secondLine)
+                    .font(Font(codeFont.nsFont(size: 11)))
                     .foregroundColor(.secondary)
                     .lineLimit(1)
             }
             
-            HStack(spacing: 4) {
+            HStack(spacing: 5) {
                 if entry.isPinned {
                     Image(systemName: "pin.fill")
                         .font(.system(size: 9))
@@ -516,32 +449,34 @@ struct HistoryEntryRow: View {
                         .foregroundColor(.secondary)
                         .help("Saved from a scratch pad")
                 }
-                Circle()
-                    .fill(AppTheme.tealSUI.opacity(isSelected ? 0.9 : 0.4))
-                    .frame(width: 5, height: 5)
                 Text(formatRelativeDate(entry.timestamp))
-                    .font(.caption2)
                     .foregroundColor(.secondary)
-                if !languageLabel.isEmpty {
-                    Text("·")
-                        .font(.caption2)
-                        .foregroundColor(.secondary.opacity(0.5))
-                    Text(languageLabel)
-                        .font(.system(size: 9, weight: entry.language != nil ? .semibold : .regular))
-                        .foregroundColor(entry.language != nil
-                                         ? (isSelected ? AppTheme.tealSUI.opacity(0.9) : AppTheme.tealSUI)
-                                         : .secondary)
+                if language != "plaintext" {
+                    Circle()
+                        .fill(EditorView.languageColor(language))
+                        .frame(width: 6, height: 6)
+                        .padding(.leading, 3)
+                    Text(EditorView.languageLabel(language))
+                        .foregroundColor(.secondary)
                 }
                 if let pasteShortcut {
                     Spacer(minLength: 4)
                     Text(pasteShortcut)
-                        .font(.system(size: 9, weight: .medium))
-                        .foregroundColor(.secondary.opacity(0.6))
+                        .font(.system(size: 10, weight: .medium))
+                        .foregroundColor(.secondary.opacity(isSelected || isHovered ? 0.8 : 0.5))
                 }
             }
+            .font(.system(size: 10))
+            .padding(.top, 1)
         }
-        .padding(.vertical, 4)
+        .padding(.horizontal, 10)
+        .padding(.vertical, 7)
         .frame(maxWidth: .infinity, alignment: .leading)
+        .background(
+            RoundedRectangle(cornerRadius: 6)
+                .fill(isSelected ? AppTheme.tealSUI.opacity(0.16)
+                      : isHovered ? Color.secondary.opacity(0.08) : Color.clear)
+        )
         .contentShape(Rectangle())
     }
 }
@@ -552,22 +487,21 @@ struct SyntaxPreviewView: NSViewRepresentable {
     let entryID: UUID
     let text: String
     let language: String
+    let lineCount: Int
+    let font: NSFont
     let isDark: Bool
     
     /// One highlighter shared by every preview — creating a Highlightr evaluates ~1 MB of
     /// highlight.js in a fresh JSContext (~20ms), far too slow to do per selection.
-    private static let sharedHighlightr: Highlightr? = {
-        let h = Highlightr()
-        h?.theme.setCodeFont(.monospacedSystemFont(ofSize: 12, weight: .regular))
-        return h
-    }()
-    
+    private static let sharedHighlightr: Highlightr? = Highlightr()
     
     class Coordinator {
         let codeStorage: NSTextStorage
         var shownEntryID: UUID?
         var shownLanguage: String?
         var appliedTheme: String?
+        var appliedFont: NSFont?
+        var rulerView: LineNumberRulerView?
         
         init() {
             if let h = SyntaxPreviewView.sharedHighlightr {
@@ -580,6 +514,7 @@ struct SyntaxPreviewView: NSViewRepresentable {
     
     func makeCoordinator() -> Coordinator { Coordinator() }
     
+    /// Built like the editor's text view (same text view class, inset and gutter), only read-only.
     func makeNSView(context: Context) -> NSScrollView {
         let textStorage = context.coordinator.codeStorage
         
@@ -591,35 +526,52 @@ struct SyntaxPreviewView: NSViewRepresentable {
         textContainer.widthTracksTextView = true
         layoutManager.addTextContainer(textContainer)
         
-        let textView = NSTextView(frame: .zero, textContainer: textContainer)
+        let textView = MangleTextView(frame: .zero, textContainer: textContainer)
+        layoutManager.delegate = textView   // hides folded text
         textView.isEditable = false
         textView.isSelectable = true
         textView.isRichText = true
-        textView.textContainerInset = NSSize(width: 16, height: 16)
-        textView.autoresizingMask = NSView.AutoresizingMask.width
+        textView.showsCurrentLine = false
+        textView.textContainerInset = CustomTextEditor.Coordinator.textInset(presenting: false)
+        textView.isVerticallyResizable = true
+        textView.isHorizontallyResizable = false
+        textView.autoresizingMask = [.width]
+        textView.maxSize = NSSize(width: CGFloat.greatestFiniteMagnitude, height: CGFloat.greatestFiniteMagnitude)
         textView.isAutomaticQuoteSubstitutionEnabled = false
         
         let scrollView = NSScrollView()
         scrollView.documentView = textView
         scrollView.hasVerticalScroller = true
         scrollView.autohidesScrollers = true
+        scrollView.wantsLayer = true
+        
+        let rulerView = LineNumberRulerView(scrollView: scrollView, orientation: .verticalRuler)
+        rulerView.clientView = textView
+        scrollView.verticalRulerView = rulerView
+        scrollView.hasVerticalRuler = true
+        scrollView.rulersVisible = true
+        context.coordinator.rulerView = rulerView
         return scrollView
     }
-    
+
     func updateNSView(_ scrollView: NSScrollView, context: Context) {
         let coordinator = context.coordinator
         guard let textView = scrollView.documentView as? NSTextView else { return }
         
         let theme = SettingsManager.shared.themeName(isDark: isDark)
-        let themeChanged = coordinator.appliedTheme != theme
+        let themeChanged = coordinator.appliedTheme != theme || coordinator.appliedFont != font
         if themeChanged, let h = Self.sharedHighlightr {
             coordinator.appliedTheme = theme
+            coordinator.appliedFont = font
             h.setTheme(to: theme)
-            h.theme.setCodeFont(.monospacedSystemFont(ofSize: 12, weight: .regular))
-            let bg = h.theme.themeBackgroundColor ?? .textBackgroundColor
+            h.theme.setCodeFont(font)
+            let bg = h.theme.themeBackgroundColor ?? (isDark ? AppTheme.editorDarkBG : .textBackgroundColor)
             textView.backgroundColor = bg
             scrollView.backgroundColor = bg
+            coordinator.rulerView?.fontSize = font.pointSize
+            coordinator.rulerView?.needsDisplay = true
         }
+        coordinator.rulerView?.setLineCount(lineCount)
         
         guard let storage = coordinator.codeStorage as? CodeAttributedString else {
             if coordinator.shownEntryID != entryID {
@@ -635,9 +587,14 @@ struct SyntaxPreviewView: NSViewRepresentable {
             coordinator.shownLanguage = lang
             // Swap text with highlighting off, then highlight once with the right language.
             storage.language = nil
-            storage.replaceCharacters(in: NSRange(location: 0, length: storage.length), with: text)
+            let oldLength = storage.length
+            (textView as? MangleTextView)?.folds = []
+            storage.replaceCharacters(in: NSRange(location: 0, length: oldLength), with: text)
+            (textView as? MangleTextView)?.noteCharactersEdited(in: NSRange(location: 0, length: storage.length),
+                                                                 changeInLength: storage.length - oldLength)
             storage.language = lang
             textView.scroll(.zero)
+            coordinator.rulerView?.needsDisplay = true
         } else if coordinator.shownLanguage != lang || themeChanged {
             coordinator.shownLanguage = lang
             storage.language = nil
