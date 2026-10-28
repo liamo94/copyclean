@@ -324,6 +324,8 @@ struct EditorView: View {
     @State private var hoverTransform = false
     /// Where the Transform chip sits (SwiftUI global, top-left origin), to pop its menu above it.
     @State private var transformChipFrame: CGRect?
+    @State private var hoverLanguage = false
+    @State private var languageChipFrame: CGRect?
     
     // Find options (restored from the last search)
     @State private var useRegex = UserDefaults.standard.bool(forKey: EditorView.lastFindRegexKey)
@@ -828,6 +830,11 @@ struct EditorView: View {
     /// The dot beside the language in the bottom bar — roughly each language's usual brand colour,
     /// lightened where needed to read on a dark bar.
     static func languageColor(_ id: String) -> Color {
+        guard let hex = languageHex(id) else { return .secondary }
+        return Color(red: Double(hex >> 16 & 0xFF) / 255, green: Double(hex >> 8 & 0xFF) / 255, blue: Double(hex & 0xFF) / 255)
+    }
+
+    private static func languageHex(_ id: String) -> Int? {
         let hex: Int
         switch id {
         case "json":                  hex = 0xE8B04A
@@ -850,33 +857,30 @@ struct EditorView: View {
         case "diff":                  hex = 0x88C057
         case "yaml":                  hex = 0xE0565B
         case "perl":                  hex = 0x6E7FC0
-        default:                      return .secondary
+        default:                      return nil
         }
-        return Color(red: Double(hex >> 16 & 0xFF) / 255, green: Double(hex >> 8 & 0xFF) / 255, blue: Double(hex & 0xFF) / 255)
+        return hex
     }
 
-    @ViewBuilder private var languagePickerItems: some View {
-        ForEach(Self.languages, id: \.id) { lang in
-            Button {
-                if lang.id == "auto" {
-                    viewModel.currentLanguage = CustomTextEditor.Coordinator.guessLanguage(viewModel.text)
-                    viewModel.languageIsManual = false
-                } else {
-                    viewModel.currentLanguage = lang.id
-                    viewModel.languageIsManual = true
-                }
-            } label: {
-                HStack {
-                    Text(lang.label)
-                    if viewModel.currentLanguage == lang.id {
-                        Spacer()
-                        Image(systemName: "checkmark")
-                    }
-                }
+    /// The bottom bar's language dot as a menu item image; languages without a colour get a hollow ring.
+    private static func languageDotImage(_ id: String) -> NSImage {
+        let color = languageHex(id).map {
+            NSColor(srgbRed: CGFloat($0 >> 16 & 0xFF) / 255, green: CGFloat($0 >> 8 & 0xFF) / 255, blue: CGFloat($0 & 0xFF) / 255, alpha: 1)
+        }
+        return NSImage(size: NSSize(width: 12, height: 12), flipped: false) { rect in
+            let dot = NSBezierPath(ovalIn: rect.insetBy(dx: 2.5, dy: 2.5))
+            if let color {
+                color.setFill()
+                dot.fill()
+            } else {
+                NSColor.secondaryLabelColor.setStroke()
+                dot.lineWidth = 1
+                dot.stroke()
             }
+            return true
         }
     }
-    
+
     // MARK: - Bottom Bar
     
     private var bottomBar: some View {
@@ -923,9 +927,17 @@ struct EditorView: View {
 
                 // Plain text that nobody chose isn't worth the space; any real language is.
                 if viewModel.currentLanguage != "plaintext" || viewModel.languageIsManual {
-                    BarMenu(title: currentLanguageLabel, dot: Self.languageColor(viewModel.currentLanguage)) {
-                        languagePickerItems
+                    Button(action: showLanguageMenu) {
+                        BarChipLabel(title: currentLanguageLabel, dot: Self.languageColor(viewModel.currentLanguage), hovered: hoverLanguage)
                     }
+                    .buttonStyle(.plain)
+                    .fixedSize()
+                    .onHover { hoverLanguage = $0 }
+                    .background(GeometryReader { geo in
+                        Color.clear
+                            .onAppear { languageChipFrame = geo.frame(in: .global) }
+                            .onChange(of: geo.frame(in: .global)) { _, frame in languageChipFrame = frame }
+                    })
                     .help(viewModel.languageIsManual ? "Language" : "Language (detected)")
                 }
 
@@ -1411,18 +1423,24 @@ struct EditorView: View {
         menu.autoenablesItems = false
 
         let languageItem = NSMenuItem(title: "Language: \(currentLanguageLabel)", action: nil, keyEquivalent: "")
-        let languages = NSMenu()
-        for lang in Self.languages {
-            let item = ClosureMenuItem(title: lang.label) { setLanguage(lang.id) }
-            item.state = viewModel.currentLanguage == lang.id ? .on : .off
-            languages.addItem(item)
-        }
-        languageItem.submenu = languages
+        languageItem.image = Self.languageDotImage(viewModel.currentLanguage)
+        languageItem.submenu = languageMenu()
         menu.addItem(languageItem)
+        menu.addItem(.separator())
 
+        // Sections are submenus so the menu stays short enough to open within the window;
+        // a lone command (Format Code) sits at the top level.
         for section in transformSections {
-            menu.addItem(.separator())
-            menu.addItem(.sectionHeader(title: section.title))
+            let target: NSMenu
+            if section.commands.count == 1 {
+                target = menu
+            } else {
+                target = NSMenu()
+                target.autoenablesItems = false
+                let sectionItem = NSMenuItem(title: section.title, action: nil, keyEquivalent: "")
+                sectionItem.submenu = target
+                menu.addItem(sectionItem)
+            }
             for cmd in section.commands {
                 let item = ClosureMenuItem(title: cmd.title, action: cmd.run)
                 item.isEnabled = cmd.isEnabled
@@ -1436,11 +1454,50 @@ struct EditorView: View {
                     if shortcut.modifiers.contains(.control) { mask.insert(.control) }
                     item.keyEquivalentModifierMask = mask
                 }
-                menu.addItem(item)
+                target.addItem(item)
             }
+            if target === menu { menu.addItem(.separator()) }
         }
 
-        // The chip's frame is top-left based; open the menu upwards from just above it.
+        popUp(menu, above: chip, in: contentView)
+    }
+
+    /// Pops the language menu up above its chip.
+    private func showLanguageMenu() {
+        guard let contentView = textView?.window?.contentView, let chip = languageChipFrame else { return }
+        popUp(languageMenu(), above: chip, in: contentView)
+    }
+
+    /// Auto-detect (naming what it found), Plain Text, then every language with its bar colour.
+    private func languageMenu() -> NSMenu {
+        let menu = NSMenu()
+        menu.autoenablesItems = false
+        let auto = ClosureMenuItem(title: "Auto-detect") { setLanguage("auto") }
+        auto.image = NSImage(systemSymbolName: "sparkles", accessibilityDescription: nil)
+        auto.state = viewModel.languageIsManual ? .off : .on
+        if !viewModel.languageIsManual {
+            let title = NSMutableAttributedString(string: "Auto-detect", attributes: [.font: NSFont.menuFont(ofSize: 0)])
+            title.append(NSAttributedString(string: "  \(currentLanguageLabel)", attributes: [
+                .font: NSFont.menuFont(ofSize: 0),
+                .foregroundColor: NSColor.secondaryLabelColor,
+            ]))
+            auto.attributedTitle = title
+        }
+        menu.addItem(auto)
+        menu.addItem(.separator())
+        for lang in Self.languages where lang.id != "auto" {
+            let item = ClosureMenuItem(title: lang.label) { setLanguage(lang.id) }
+            item.image = Self.languageDotImage(lang.id)
+            item.state = viewModel.languageIsManual && viewModel.currentLanguage == lang.id ? .on : .off
+            menu.addItem(item)
+            if lang.id == "plaintext" { menu.addItem(.separator()) }
+        }
+        return menu
+    }
+
+    /// Opens `menu` upwards from just above a bottom-bar chip. The chip's frame is SwiftUI global
+    /// (top-left based).
+    private func popUp(_ menu: NSMenu, above chip: CGRect, in contentView: NSView) {
         let chipTop = contentView.isFlipped ? chip.minY : contentView.bounds.height - chip.minY
         let point = NSPoint(x: chip.minX, y: contentView.isFlipped ? chipTop - menu.size.height - 4 : chipTop + menu.size.height + 4)
         menu.popUp(positioning: nil, at: point, in: contentView)
