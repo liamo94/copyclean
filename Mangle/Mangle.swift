@@ -1194,14 +1194,18 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMenuDele
         
         // Pure AppKit toast — avoids NSHostingView constraint loops in borderless panels.
         let hPad: CGFloat = 12
-        let vPad: CGFloat = 6
-        let font = NSFont.systemFont(ofSize: 12, weight: .medium)
+        let iconSize: CGFloat = 16
+        let spacing: CGFloat = 8
+        let height: CGFloat = 34
         
-        // Measure text
-        let attrs: [NSAttributedString.Key: Any] = [.font: font, .foregroundColor: AppTheme.onTeal]
-        let textSize = (message as NSString).size(withAttributes: attrs)
-        let width  = ceil(textSize.width)  + hPad * 2
-        let height = ceil(textSize.height) + vPad * 2
+        // Size the label from the field itself — measuring the bare string ignores the
+        // cell's padding and clips the last character.
+        let label = NSTextField(labelWithString: message)
+        label.font = NSFont.systemFont(ofSize: 13, weight: .medium)
+        label.textColor = .labelColor
+        label.lineBreakMode = .byClipping
+        let labelSize = label.fittingSize
+        let width = hPad + iconSize + spacing + ceil(labelSize.width) + hPad
         
         let panel = NSPanel(
             contentRect: NSRect(x: 0, y: 0, width: width, height: height),
@@ -1211,34 +1215,49 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMenuDele
         )
         panel.isOpaque = false
         panel.backgroundColor = .clear
+        panel.hasShadow = true
         panel.level = .floating
         panel.ignoresMouseEvents = true
         panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
         
-        // Layer-backed container with rounded rect background
-        let container = NSView(frame: NSRect(x: 0, y: 0, width: width, height: height))
+        let container = NSVisualEffectView(frame: NSRect(x: 0, y: 0, width: width, height: height))
+        container.material = .popover
+        container.blendingMode = .behindWindow
+        container.state = .active
         container.wantsLayer = true
-        container.layer?.backgroundColor = NSColor(red: 0.20, green: 0.78, blue: 0.60, alpha: 0.95).cgColor
-        container.layer?.cornerRadius = 7
-        container.layer?.shadowColor = NSColor.black.withAlphaComponent(0.2).cgColor
-        container.layer?.shadowOpacity = 1
-        container.layer?.shadowRadius = 4
-        container.layer?.shadowOffset = CGSize(width: 0, height: -2)
+        container.layer?.cornerRadius = 9
+        container.layer?.masksToBounds = true
+        container.layer?.borderWidth = 0.5
+        container.layer?.borderColor = NSColor.separatorColor.cgColor
+
+        // The popover material reads a bit light in dark mode; dim it slightly.
+        if container.effectiveAppearance.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua {
+            let dim = NSView(frame: container.bounds)
+            dim.wantsLayer = true
+            dim.layer?.backgroundColor = NSColor.black.withAlphaComponent(0.25).cgColor
+            container.addSubview(dim)
+        }
         
-        // Label — no autolayout, plain frame
-        let label = NSTextField(frame: NSRect(x: hPad, y: vPad, width: ceil(textSize.width), height: ceil(textSize.height)))
-        label.stringValue = message
-        label.font = font
-        label.textColor = AppTheme.onTeal
-        label.isBezeled = false
-        label.isEditable = false
-        label.isSelectable = false
-        label.drawsBackground = false
-        label.cell?.wraps = false
-        label.cell?.truncatesLastVisibleLine = false
+        let icon = NSImageView(frame: NSRect(x: hPad, y: (height - iconSize) / 2, width: iconSize, height: iconSize))
+        if let logo = NSImage(named: "MenuBarIcon")?.copy() as? NSImage {
+            logo.isTemplate = true
+            icon.image = logo
+        }
+        icon.imageScaling = .scaleProportionallyUpOrDown
+        icon.contentTintColor = AppTheme.teal
+        container.addSubview(icon)
+        
+        label.frame = NSRect(
+            x: hPad + iconSize + spacing,
+            y: (height - labelSize.height) / 2,
+            width: ceil(labelSize.width),
+            height: labelSize.height
+        )
         container.addSubview(label)
         
         panel.contentView = container
+        // The shadow is computed from the window's opaque pixels; refresh once content is in.
+        panel.invalidateShadow()
         
         // Top-right of the editor/history window while one is showing (below its title
         // bar); top-right of the screen otherwise, e.g. after Save has closed the editor.
