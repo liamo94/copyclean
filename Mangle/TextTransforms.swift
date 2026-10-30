@@ -708,6 +708,101 @@ nonisolated enum TextTransforms {
     }
 }
 
+// MARK: - Lists
+
+/// A Markdown-style list line: "  - [ ] milk" is indent "  ", bullet "-", checkbox "[ ]", content "milk".
+nonisolated struct ListItem: Equatable {
+    var indent: String
+    /// "-", "*", "+", or a number with its delimiter, like "3." or "3)".
+    var bullet: String
+    /// "[ ]" or "[x]" for a task item.
+    var checkbox: String?
+    var content: String
+    /// How much of the line the marker takes up. Can be one short of `prefix`, for a task
+    /// with nothing after its box ("- [ ]").
+    let prefixLength: Int
+
+    private static let pattern = try! NSRegularExpression(pattern: #"^([ \t]*)([-*+]|\d{1,9}[.)]) (\[[ xX]\](?: |$))?(.*)$"#)
+
+    init?(_ line: String) {
+        let ns = line as NSString
+        guard let m = Self.pattern.firstMatch(in: line, range: NSRange(location: 0, length: ns.length)) else { return nil }
+        func group(_ i: Int) -> String? {
+            let r = m.range(at: i)
+            return r.location == NSNotFound ? nil : ns.substring(with: r)
+        }
+        indent = group(1) ?? ""
+        bullet = group(2) ?? "-"
+        checkbox = group(3).map { $0.trimmingCharacters(in: .whitespaces) }
+        content = group(4) ?? ""
+        prefixLength = m.range(at: 4).location
+    }
+
+    var number: Int? { Int(bullet.dropLast()) }
+
+    /// Everything before the content, e.g. "  - [ ] ".
+    var prefix: String { indent + bullet + " " + (checkbox.map { $0 + " " } ?? "") }
+
+    /// The marker for the item after this one: the next number, and an unticked box.
+    var nextPrefix: String {
+        let next = number.map { "\($0 + 1)\(bullet.last!)" } ?? bullet
+        return indent + next + " " + (checkbox == nil ? "" : "[ ] ")
+    }
+}
+
+extension TextTransforms {
+    /// "- " before every non-blank line, replacing any marker it already had.
+    static func bulletLines(_ text: String) -> String {
+        relist(text) { _ in "-" }
+    }
+
+    /// "1. ", "2. "… before every non-blank line, replacing any marker it already had.
+    static func numberLines(_ text: String) -> String {
+        var n = 0
+        return relist(text) { _ in n += 1; return "\(n)." }
+    }
+
+    private static func relist(_ text: String, bullet: (String) -> String) -> String {
+        text.components(separatedBy: "\n").map { line in
+            guard !line.allSatisfy(\.isWhitespace) else { return line }
+            if let item = ListItem(line) {
+                return item.indent + bullet(line) + " " + (item.checkbox.map { $0 + " " } ?? "") + item.content
+            }
+            let indent = line.prefix(while: { $0 == " " || $0 == "\t" })
+            return indent + bullet(line) + " " + line.dropFirst(indent.count)
+        }.joined(separator: "\n")
+    }
+
+    /// Numbers each numbered list in order, keeping its first number and its own count at
+    /// each nesting level. Blank lines and indented text don't break a list; a line of
+    /// unindented text does.
+    static func renumberLists(_ text: String) -> String {
+        var counters: [(indent: Int, next: Int)] = []
+        return text.components(separatedBy: "\n").map { line in
+            guard var item = ListItem(line) else {
+                if let first = line.first, first != " ", first != "\t" { counters.removeAll() }
+                return line
+            }
+            let depth = item.indent.replacingOccurrences(of: "\t", with: "    ").count
+            counters.removeAll { $0.indent > depth }
+            guard let number = item.number else {
+                counters.removeAll { $0.indent == depth }
+                return line
+            }
+            let next: Int
+            if let i = counters.firstIndex(where: { $0.indent == depth }) {
+                next = counters[i].next
+                counters[i].next += 1
+            } else {
+                next = number
+                counters.append((depth, number + 1))
+            }
+            item.bullet = "\(next)\(item.bullet.last!)"
+            return item.prefix + item.content
+        }.joined(separator: "\n")
+    }
+}
+
 // MARK: - Code Folding
 
 /// A multi-line `{…}` or `[…]` block that can be folded.

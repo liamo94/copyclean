@@ -9,7 +9,7 @@ private let abbreviatedRelativeFormatter: RelativeDateTimeFormatter = {
     return formatter
 }()
 
-private func formatRelativeDate(_ date: Date) -> String {
+func formatRelativeDate(_ date: Date) -> String {
     abbreviatedRelativeFormatter.localizedString(for: date, relativeTo: Date())
 }
 

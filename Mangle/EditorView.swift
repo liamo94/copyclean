@@ -16,29 +16,32 @@ enum AppTheme {
 
 // MARK: - Editor Font
 
-enum EditorFont: String, CaseIterable, Identifiable, Hashable {
-    case system = "System"
-    case sfMono = "SF Mono"
-    case menlo = "Menlo"
-    case monaco = "Monaco"
-    case courierNew = "Courier New"
-    case andaleMono = "Andale Mono"
+/// The editor's font: the system's monospaced font (SF Mono), or any installed fixed-pitch
+/// family, saved by family name.
+struct EditorFont: RawRepresentable, Identifiable, Hashable {
+    let rawValue: String
 
-    var id: String { rawValue }
+    static let system = EditorFont(rawValue: "System")
 
-    private var postScriptName: String? {
-        switch self {
-        case .system: return nil
-        case .sfMono: return "SFMono-Regular"
-        case .menlo: return "Menlo-Regular"
-        case .monaco: return "Monaco"
-        case .courierNew: return "CourierNewPSMT"
-        case .andaleMono: return "AndaleMono"
-        }
+    init(rawValue: String) {
+        // "SF Mono" was its own choice, but it's the system font and can't be loaded by name.
+        self.rawValue = rawValue == "SF Mono" ? "System" : rawValue
     }
 
+    var id: String { rawValue }
+    var label: String { self == .system ? "System (SF Mono)" : rawValue }
+
+    /// The system font, then every installed fixed-pitch family by name. Looked up once:
+    /// fonts installed while the app is running show up after a relaunch.
+    static let allCases: [EditorFont] = {
+        let names = NSFontManager.shared.availableFontNames(with: .fixedPitchFontMask) ?? []
+        let families = Set(names.compactMap { NSFont(name: $0, size: 12)?.familyName }.filter { !$0.hasPrefix(".") })
+        return [.system] + families.sorted { $0.localizedStandardCompare($1) == .orderedAscending }.map(EditorFont.init)
+    }()
+
     func nsFont(size: CGFloat) -> NSFont {
-        guard let name = postScriptName, let font = NSFont(name: name, size: size) else {
+        guard self != .system,
+              let font = NSFontManager.shared.font(withFamily: rawValue, traits: [], weight: 5, size: size) else {
             return .monospacedSystemFont(ofSize: size, weight: .regular)
         }
         return font
@@ -1424,7 +1427,7 @@ struct EditorView: View {
 
         let languageItem = NSMenuItem(title: "Language: \(currentLanguageLabel)", action: nil, keyEquivalent: "")
         languageItem.image = Self.languageDotImage(viewModel.currentLanguage)
-        languageItem.submenu = languageMenu()
+        languageItem.submenu = languageMenu(fittingAbove: chip)
         menu.addItem(languageItem)
         menu.addItem(.separator())
 
@@ -1465,11 +1468,18 @@ struct EditorView: View {
     /// Pops the language menu up above its chip.
     private func showLanguageMenu() {
         guard let contentView = textView?.window?.contentView, let chip = languageChipFrame else { return }
-        popUp(languageMenu(), above: chip, in: contentView)
+        popUp(languageMenu(fittingAbove: chip), above: chip, in: contentView)
     }
 
-    /// Auto-detect (naming what it found), Plain Text, then every language with its bar colour.
-    private func languageMenu() -> NSMenu {
+    /// In a short window the list would run far past the top, so it goes in two columns.
+    private func languageMenu(fittingAbove chip: CGRect) -> NSMenu {
+        let menu = languageMenu(columns: 1)
+        return menu.size.height > chip.minY ? languageMenu(columns: 2) : menu
+    }
+
+    /// Auto-detect (naming what it found), Plain Text, then every language with its bar colour,
+    /// in `columns` columns.
+    private func languageMenu(columns: Int) -> NSMenu {
         let menu = NSMenu()
         menu.autoenablesItems = false
         let auto = ClosureMenuItem(title: "Auto-detect") { setLanguage("auto") }
@@ -1485,12 +1495,22 @@ struct EditorView: View {
         }
         menu.addItem(auto)
         menu.addItem(.separator())
-        for lang in Self.languages where lang.id != "auto" {
+        let isChosen = { (id: String) in viewModel.languageIsManual && viewModel.currentLanguage == id }
+        for lang in Self.languages where lang.id != "auto" && (columns == 1 || lang.id == "plaintext") {
             let item = ClosureMenuItem(title: lang.label) { setLanguage(lang.id) }
             item.image = Self.languageDotImage(lang.id)
-            item.state = viewModel.languageIsManual && viewModel.currentLanguage == lang.id ? .on : .off
+            item.state = isChosen(lang.id) ? .on : .off
             menu.addItem(item)
             if lang.id == "plaintext" { menu.addItem(.separator()) }
+        }
+        if columns > 1 {
+            let cells = Self.languages.filter { $0.id != "auto" && $0.id != "plaintext" }.map { lang in
+                MenuGridView.Cell(title: lang.label, image: Self.languageDotImage(lang.id),
+                                  isChecked: isChosen(lang.id)) { setLanguage(lang.id) }
+            }
+            let grid = NSMenuItem()
+            grid.view = MenuGridView(cells: cells, columns: columns)
+            menu.addItem(grid)
         }
         return menu
     }
@@ -1663,7 +1683,7 @@ struct EditorView: View {
                           isCurrent: settings.appearance == appearance) { settings.appearance = appearance }
         }
         commands += EditorFont.allCases.map { font in
-            EditorCommand(title: "Set Font: \(font.rawValue)", section: "Appearance",
+            EditorCommand(title: "Set Font: \(font.label)", section: "Appearance",
                           isCurrent: settings.editorFont == font) { settings.editorFont = font }
         }
         commands += Self.languages.map { lang in
@@ -1738,6 +1758,9 @@ struct EditorView: View {
             t("Remove Duplicate Lines", "Lines", scope: .linesOrDocument, TextTransforms.removeDuplicateLines),
             t("Reverse Lines", "Lines", scope: .linesOrDocument, TextTransforms.reverseLines),
             t("Join Lines", "Lines", scope: .currentLines, TextTransforms.joinLines),
+            t("Bullet Lines", "Lines", scope: .currentLines, TextTransforms.bulletLines),
+            t("Number Lines", "Lines", scope: .currentLines, TextTransforms.numberLines),
+            t("Renumber Lists", "Lines", scope: .linesOrDocument, TextTransforms.renumberLists),
         ]))
         sections.append(("JSON", [
             t("Pretty Print JSON", "JSON") { try TextTransforms.prettyPrintJSON($0, indentation: indentation) },
@@ -2112,6 +2135,9 @@ final class MangleTextView: NSTextView {
     }
     /// Quote pairing is off for prose (plain text / Markdown), where it mostly gets in the way.
     var autoCloseQuotes = true
+    /// In prose, Return continues a list and Tab nests its item. Off for code, where "- " and
+    /// "* " mean other things.
+    var continuesLists = false
     
     private var isDark: Bool { effectiveAppearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua }
     
@@ -2430,6 +2456,11 @@ final class MangleTextView: NSTextView {
         var lineStart = 0, contentsEnd = 0
         text.getLineStart(&lineStart, end: nil, contentsEnd: &contentsEnd, for: NSRange(location: sel.location, length: 0))
         let currentLine = text.substring(with: NSRange(location: lineStart, length: contentsEnd - lineStart))
+        if continuesLists, let item = ListItem(currentLine),
+           sel.location >= lineStart + item.prefixLength {
+            continueList(item, lineStart: lineStart, contentsEnd: contentsEnd, selection: sel)
+            return
+        }
         let leadingWhitespace = String(currentLine.prefix(while: { $0 == " " || $0 == "\t" }))
 
         let beforeCursor = text.substring(with: NSRange(location: lineStart, length: sel.location - lineStart))
@@ -2466,6 +2497,59 @@ final class MangleTextView: NSTextView {
         replaceCharacters(in: sel, with: insertion)
         didChangeText()
         setSelectedRange(NSRange(location: sel.location + cursorOffset, length: 0))
+    }
+
+    // MARK: Lists
+
+    /// Return in a list item: starts the next item, or on an empty item, steps out a level
+    /// (or out of the list at the top level).
+    private func continueList(_ item: ListItem, lineStart: Int, contentsEnd: Int, selection sel: NSRange) {
+        let replaceRange: NSRange
+        let insertion: String
+        if item.content.allSatisfy(\.isWhitespace) && NSMaxRange(sel) >= contentsEnd {
+            replaceRange = NSRange(location: lineStart, length: contentsEnd - lineStart)
+            if item.indent.isEmpty {
+                insertion = ""
+            } else {
+                var outdented = item
+                outdented.indent = TextTransforms.outdentLines(item.indent, tabSize: indentWidth)
+                insertion = outdented.prefix
+            }
+        } else {
+            replaceRange = sel
+            insertion = "\n" + item.nextPrefix
+        }
+        guard shouldChangeText(in: replaceRange, replacementString: insertion) else { return }
+        replaceCharacters(in: replaceRange, with: insertion)
+        didChangeText()
+        setSelectedRange(NSRange(location: replaceRange.location + insertion.utf16.count, length: 0))
+    }
+
+    /// Tab / ⇧Tab on a list item nests or un-nests the whole item, wherever the caret is.
+    /// A newly nested numbered item starts again at 1. False when the line isn't a list item.
+    func shiftListItem(outdent: Bool) -> Bool {
+        guard continuesLists, !hasMultipleSelections else { return false }
+        let text = string as NSString
+        let sel = selectedRange()
+        var lineStart = 0, contentsEnd = 0
+        text.getLineStart(&lineStart, end: nil, contentsEnd: &contentsEnd, for: NSRange(location: sel.location, length: 0))
+        guard NSMaxRange(sel) <= contentsEnd,
+              var item = ListItem(text.substring(with: NSRange(location: lineStart, length: contentsEnd - lineStart))) else { return false }
+        let oldLength = item.prefixLength
+        if outdent {
+            guard !item.indent.isEmpty else { return true }
+            item.indent = TextTransforms.outdentLines(item.indent, tabSize: indentWidth)
+        } else {
+            item.indent += indentation.unit
+            if item.number != nil { item.bullet = "1" + String(item.bullet.last!) }
+        }
+        let range = NSRange(location: lineStart, length: oldLength)
+        guard shouldChangeText(in: range, replacementString: item.prefix) else { return true }
+        replaceCharacters(in: range, with: item.prefix)
+        didChangeText()
+        let delta = item.prefix.utf16.count - oldLength
+        setSelectedRange(NSRange(location: max(lineStart, sel.location + delta), length: sel.length))
+        return true
     }
 
     // MARK: Auto-closing brackets & quotes
@@ -3069,6 +3153,9 @@ struct CustomTextEditor: NSViewRepresentable {
         textView.isAutomaticDashSubstitutionEnabled = false
         textView.isAutomaticTextReplacementEnabled = false
         textView.isRichText = true
+        // An empty document's line takes its height from the typing font, so without this
+        // the current-line band grew when the first character went in.
+        textView.typingAttributes[.font] = editorFont.nsFont(size: fontSize)
         coordinator.applyThemeColors(to: textView, isDark: isDark)
         
         let scrollView = NSScrollView()
@@ -3127,6 +3214,7 @@ struct CustomTextEditor: NSViewRepresentable {
             // Manual language change from the picker
             storage.language = language
             textView.autoCloseQuotes = Coordinator.pairsQuotes(language)
+            textView.continuesLists = !Coordinator.pairsQuotes(language)
             textView.foldSkipsStrings = Coordinator.pairsQuotes(language)
         }
         
@@ -3288,6 +3376,7 @@ struct CustomTextEditor: NSViewRepresentable {
             let fg: NSColor = parent.isDark ? NSColor(white: 0.85, alpha: 1) : NSColor(white: 0.1, alpha: 1)
             storage.setAttributes([.font: font, .foregroundColor: fg], range: NSRange(location: 0, length: storage.length))
             storage.endEditing()
+            textView.typingAttributes[.font] = font
             tokenCounts = nil
             dirtyBlock = nil
             storage.language = language
@@ -3300,6 +3389,7 @@ struct CustomTextEditor: NSViewRepresentable {
                 mtv.currentFindRange = nil
                 mtv.bracketRanges = []
                 mtv.autoCloseQuotes = Self.pairsQuotes(language)
+                mtv.continuesLists = !Self.pairsQuotes(language)
                 mtv.foldSkipsStrings = Self.pairsQuotes(language)
                 let indentation = Indentation.detect(in: text) ?? .defaultForSettings
                 mtv.indentation = indentation
@@ -3769,6 +3859,7 @@ struct CustomTextEditor: NSViewRepresentable {
         
         private func handleTab(textView: NSTextView, reverse: Bool) {
             let mtv = textView as? MangleTextView
+            if mtv?.shiftListItem(outdent: reverse) == true { return }
             let indentation = mtv?.indentation ?? .defaultForSettings
             let tabSize = mtv?.indentWidth ?? max(SettingsManager.shared.tabSize, 1)
             let spaces = indentation.unit
@@ -3841,7 +3932,8 @@ struct CustomTextEditor: NSViewRepresentable {
 
 // MARK: - Status Bar Labels
 
-/// "Spaces: 4 · LF" — shows the document's indentation and line endings, and changes them.
+/// "Spaces: 4" (plus "· CRLF" when the line endings aren't LF) — shows the document's
+/// indentation and line endings, and changes them. Converting to CR is left to the palette.
 private struct DocumentFormatMenu: View {
     @ObservedObject var status: EditorStatus
     let onIndentation: (Indentation) -> Void
@@ -3851,7 +3943,7 @@ private struct DocumentFormatMenu: View {
     private let options: [Indentation] = [.spaces(2), .spaces(4), .tabs]
     
     var body: some View {
-        BarMenu(title: "\(status.indentation.label) · \(status.lineEnding.rawValue)", systemImage: "increase.indent") {
+        BarMenu(title: title, systemImage: "increase.indent") {
             Picker("Indent Using", selection: Binding(get: { status.indentation }, set: onIndentation)) {
                 ForEach(options, id: \.self) { Text($0.label).tag($0) }
             }
@@ -3863,12 +3955,17 @@ private struct DocumentFormatMenu: View {
             }
             Divider()
             Section("Line Endings: \(status.lineEnding.rawValue)") {
-                Button("Convert to LF") { onLineEnding(.lf) }
-                Button("Convert to CRLF") { onLineEnding(.crlf) }
-                Button("Convert to CR") { onLineEnding(.cr) }
+                ForEach([LineEnding.lf, .crlf].filter { $0 != status.lineEnding }, id: \.self) { ending in
+                    Button("Convert to \(ending.rawValue)") { onLineEnding(ending) }
+                }
             }
         }
         .help("Indentation and line endings")
+    }
+    
+    private var title: String {
+        let indentation = status.indentation.label
+        return status.lineEnding == .lf ? indentation : "\(indentation) · \(status.lineEnding.rawValue)"
     }
 }
 
@@ -4023,6 +4120,80 @@ private final class ClosureMenuItem: NSMenuItem {
     required init(coder: NSCoder) { fatalError("init(coder:) is not supported") }
 
     @objc private func run() { handler() }
+}
+
+/// Menu items laid out in columns (read down, then across), for lists too long for a short
+/// window. Looks like ordinary menu items; picked with the mouse only.
+private final class MenuGridView: NSView {
+    struct Cell {
+        let title: String
+        let image: NSImage?
+        let isChecked: Bool
+        let action: () -> Void
+    }
+
+    private let cells: [Cell]
+    private let rows: Int
+    private let columnWidth: CGFloat
+    private let rowHeight: CGFloat = 24
+    private let inset: CGFloat = 5
+    private let font = NSFont.menuFont(ofSize: 0)
+    private var hovered: Int? { didSet { if hovered != oldValue { needsDisplay = true } } }
+
+    init(cells: [Cell], columns: Int) {
+        self.cells = cells
+        rows = (cells.count + columns - 1) / columns
+        let widest = cells.map { ($0.title as NSString).size(withAttributes: [.font: NSFont.menuFont(ofSize: 0)]).width }.max() ?? 0
+        // Check mark, image, gap, title, trailing padding — like a menu item.
+        columnWidth = ceil(22 + 12 + 6 + widest + 24)
+        super.init(frame: NSRect(x: 0, y: 0, width: columnWidth * CGFloat(columns) + inset * 2, height: rowHeight * CGFloat(rows)))
+        addTrackingArea(NSTrackingArea(rect: .zero, options: [.mouseMoved, .mouseEnteredAndExited, .activeAlways, .inVisibleRect],
+                                       owner: self, userInfo: nil))
+    }
+
+    required init?(coder: NSCoder) { fatalError("init(coder:) is not supported") }
+
+    override var isFlipped: Bool { true }
+
+    private func rect(of index: Int) -> NSRect {
+        NSRect(x: inset + CGFloat(index / rows) * columnWidth, y: CGFloat(index % rows) * rowHeight,
+               width: columnWidth, height: rowHeight)
+    }
+
+    private func index(at point: NSPoint) -> Int? {
+        cells.indices.first { rect(of: $0).contains(point) }
+    }
+
+    override func mouseMoved(with event: NSEvent) { hovered = index(at: convert(event.locationInWindow, from: nil)) }
+    override func mouseEntered(with event: NSEvent) { mouseMoved(with: event) }
+    override func mouseExited(with event: NSEvent) { hovered = nil }
+
+    override func mouseUp(with event: NSEvent) {
+        guard let index = index(at: convert(event.locationInWindow, from: nil)) else { return }
+        enclosingMenuItem?.menu?.cancelTracking()
+        let action = cells[index].action
+        DispatchQueue.main.async { action() }
+    }
+
+    override func draw(_ dirtyRect: NSRect) {
+        for (index, cell) in cells.enumerated() {
+            let frame = rect(of: index)
+            let isHovered = index == hovered
+            if isHovered {
+                NSColor.selectedContentBackgroundColor.setFill()
+                NSBezierPath(roundedRect: frame, xRadius: 6, yRadius: 6).fill()
+            }
+            let textColor: NSColor = isHovered ? .selectedMenuItemTextColor : .labelColor
+            if cell.isChecked {
+                let check = NSAttributedString(string: "✓", attributes: [.font: font, .foregroundColor: textColor])
+                check.draw(at: NSPoint(x: frame.minX + 8, y: frame.midY - check.size().height / 2))
+            }
+            cell.image?.draw(in: NSRect(x: frame.minX + 22, y: frame.midY - 6, width: 12, height: 12),
+                             from: .zero, operation: .sourceOver, fraction: 1, respectFlipped: true, hints: nil)
+            let title = NSAttributedString(string: cell.title, attributes: [.font: font, .foregroundColor: textColor])
+            title.draw(at: NSPoint(x: frame.minX + 40, y: frame.midY - title.size().height / 2))
+        }
+    }
 }
 
 private struct CursorPositionLabel: View {

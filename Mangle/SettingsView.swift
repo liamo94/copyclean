@@ -246,7 +246,7 @@ class SettingsManager: ObservableObject {
         wordWrap = UserDefaults.standard.object(forKey: "WordWrap") as? Bool ?? true
 
         let storedFontName = UserDefaults.standard.string(forKey: "EditorFontName")
-        editorFont = storedFontName.flatMap(EditorFont.init(rawValue:)) ?? .system
+        editorFont = storedFontName.map(EditorFont.init(rawValue:)) ?? .system
         
         useTabs = UserDefaults.standard.bool(forKey: "UseTabs")
         doubleCopyOpensEditor = UserDefaults.standard.object(forKey: "DoubleCopyOpensEditor") as? Bool ?? true
@@ -500,13 +500,8 @@ struct SettingsView: View {
                         HStack {
                             Text("Font")
                             Spacer()
-                            Picker("", selection: $editorFont) {
-                                ForEach(EditorFont.allCases) { font in
-                                    Text(font.rawValue).tag(font)
-                                }
-                            }
-                            .labelsHidden()
-                            .frame(width: 160)
+                            FontPopUp(selection: $editorFont)
+                                .frame(width: 160)
                             .id(colorScheme)
                         }
                         
@@ -780,5 +775,50 @@ struct TealProminentButtonStyle: ButtonStyle {
             .padding(.horizontal, 12)
             .padding(.vertical, 4)
             .background(AppTheme.tealSUI.opacity(configuration.isPressed ? 0.8 : 1), in: RoundedRectangle(cornerRadius: 6))
+    }
+}
+
+/// The font picker, with each font's name drawn in that font. (SwiftUI's menu picker draws
+/// every item in the menu font.)
+private struct FontPopUp: NSViewRepresentable {
+    @Binding var selection: EditorFont
+
+    func makeCoordinator() -> Coordinator { Coordinator(self) }
+
+    func makeNSView(context: Context) -> NSPopUpButton {
+        let button = NSPopUpButton(frame: .zero, pullsDown: false)
+        button.target = context.coordinator
+        button.action = #selector(Coordinator.changed(_:))
+        return button
+    }
+
+    func updateNSView(_ button: NSPopUpButton, context: Context) {
+        context.coordinator.parent = self
+        // A saved font that's since been uninstalled stays listed (drawn in the fallback).
+        let fonts = EditorFont.allCases.contains(selection) ? EditorFont.allCases : EditorFont.allCases + [selection]
+        if button.itemArray.compactMap({ $0.representedObject as? String }) != fonts.map(\.rawValue) {
+            button.removeAllItems()
+            for (index, font) in fonts.enumerated() {
+                button.addItem(withTitle: font.label)
+                let item = button.lastItem
+                item?.attributedTitle = NSAttributedString(string: font.label, attributes: [.font: font.nsFont(size: 13)])
+                item?.representedObject = font.rawValue
+                // The system font apart from the installed ones.
+                if index == 0, fonts.count > 1 { button.menu?.addItem(.separator()) }
+            }
+        }
+        if button.selectedItem?.representedObject as? String != selection.rawValue {
+            button.select(button.itemArray.first { $0.representedObject as? String == selection.rawValue })
+        }
+    }
+
+    final class Coordinator: NSObject {
+        var parent: FontPopUp
+        init(_ parent: FontPopUp) { self.parent = parent }
+
+        @objc func changed(_ sender: NSPopUpButton) {
+            guard let raw = sender.selectedItem?.representedObject as? String else { return }
+            parent.selection = EditorFont(rawValue: raw)
+        }
     }
 }

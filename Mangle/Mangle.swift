@@ -32,6 +32,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMenuDele
     var scratchHotKeyRef: EventHotKeyRef?
     var editorViewModel = EditorViewModel()
     var historyManager = HistoryManager()
+    private let recentPreview = RecentPreviewPanel()
     var statusItem: NSStatusItem?
     var eventHandlerInstalled = false
     /// Handles keys pressed in History; set by `HistoryView`. Returns nil when handled.
@@ -244,20 +245,67 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMenuDele
             menu.addItem(empty)
             return
         }
-        for entry in ordered.prefix(8) {
-            var title = historyManager.meta(for: entry).preview
-            if title.count > 48 { title = String(title.prefix(47)) + "…" }
-            let item = NSMenuItem(title: title.isEmpty ? "(whitespace)" : title, action: #selector(copyRecent(_:)), keyEquivalent: "")
+        let font = SettingsManager.shared.editorFont.nsFont(size: 12)
+        for (index, entry) in ordered.prefix(9).enumerated() {
+            let meta = historyManager.meta(for: entry)
+            var title = meta.preview
+            if title.count > 40 { title = String(title.prefix(39)) + "…" }
+            if title.isEmpty { title = "(whitespace)" }
+            // Unmodified digits work while the submenu is open, like History's ⌘1…⌘9.
+            let item = NSMenuItem(title: title, action: #selector(copyRecent(_:)), keyEquivalent: "\(index + 1)")
+            item.keyEquivalentModifierMask = []
+            item.attributedTitle = NSAttributedString(string: title, attributes: [.font: font])
+            item.subtitle = recentSubtitle(entry, meta: meta)
             item.target = self
             item.representedObject = entry.id
-            item.toolTip = String(entry.text.prefix(500))
-            if entry.isPinned { item.image = NSImage(systemSymbolName: "pin.fill", accessibilityDescription: "Pinned") }
+            item.image = recentIcon(entry, meta: meta)
             menu.addItem(item)
         }
         menu.addItem(NSMenuItem.separator())
         let all = NSMenuItem(title: "Show All…", action: #selector(showHistory), keyEquivalent: "")
+        all.image = NSImage(systemSymbolName: "clock.arrow.circlepath", accessibilityDescription: nil)
         all.target = self
         menu.addItem(all)
+    }
+
+    func menu(_ menu: NSMenu, willHighlight item: NSMenuItem?) {
+        guard let id = item?.representedObject as? UUID,
+              let entry = historyManager.entries.first(where: { $0.id == id }) else {
+            recentPreview.hide()
+            return
+        }
+        let language = entry.language ?? historyManager.meta(for: entry).detectedLanguage
+        // The submenu opens level with its item, so its top is below the top of the menu it came from.
+        let submenu = RecentPreviewPanel.menuWindows().min { $0.frame.maxY < $1.frame.maxY }
+        recentPreview.show(entry, language: language, beside: submenu)
+    }
+    
+    func menuDidClose(_ menu: NSMenu) {
+        recentPreview.hide()
+    }
+    
+    /// "2m ago · Swift · 12 lines", matching History's rows.
+    private func recentSubtitle(_ entry: HistoryEntry, meta: HistoryEntryMeta) -> String {
+        var parts = [formatRelativeDate(entry.timestamp)]
+        let language = entry.language ?? meta.detectedLanguage
+        if language != "plaintext" { parts.append(EditorView.languageLabel(language)) }
+        parts.append(meta.lines == 1 ? "1 line" : "\(meta.lines) lines")
+        return parts.joined(separator: " · ")
+    }
+
+    /// A pin for pinned snippets, otherwise the language's dot (grey for plain text).
+    private func recentIcon(_ entry: HistoryEntry, meta: HistoryEntryMeta) -> NSImage? {
+        if entry.isPinned {
+            let pin = NSImage(systemSymbolName: "pin.fill", accessibilityDescription: "Pinned")
+            return pin?.withSymbolConfiguration(.init(paletteColors: [AppTheme.teal]))
+        }
+        let language = entry.language ?? meta.detectedLanguage
+        let color = language == "plaintext" ? NSColor.tertiaryLabelColor : NSColor(EditorView.languageColor(language))
+        return NSImage(size: NSSize(width: 16, height: 16), flipped: false) { rect in
+            color.setFill()
+            NSBezierPath(ovalIn: NSRect(x: rect.midX - 4, y: rect.midY - 4, width: 8, height: 8)).fill()
+            return true
+        }
     }
     
     @objc private func copyRecent(_ sender: NSMenuItem) {
